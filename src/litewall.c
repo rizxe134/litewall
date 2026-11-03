@@ -51,6 +51,7 @@ static Screen g_scr[MAX_MON];
 static int g_nscr;
 static NOTIFYICONDATAW g_nid;
 static UINT g_taskbarCreated;
+static UINT g_showMsg;   // sent by a second launch: open the library window
 static wchar_t g_ini[MAX_PATH];
 static wchar_t g_file[MAX_PATH * 2];
 static int g_userPaused, g_locked, g_pauseOnBattery = 1, g_pauseOnMaximized = 1, g_fill = 1;
@@ -577,6 +578,7 @@ static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 static LRESULT CALLBACK msg_proc_wrap(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == g_showMsg && msg) { ui_open(); return 0; }
     if (msg == WM_OPT_DONE) { LOG("optimized copy ready -> reloading players"); create_screens(); apply_pause(); return 0; }
     if (msg == WM_TIMER && wp == 5) { g_statTicks++; log_stats(); if (g_statTicks == 3 || g_statTicks == 15) for (int g = 0; g < g_ngrp; g++) if (g_grp[g].mpv) log_player_props(g_grp[g].mpv, g); if (g_statTicks >= g_statSecs) {
         KillTimer(h, 5);
@@ -593,7 +595,24 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     (void)prev; (void)cmd; (void)show;
     g_inst = inst;
     HANDLE mutex = CreateMutexW(NULL, TRUE, L"LiteWall.SingleInstance");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) { MessageBoxW(NULL, L"LiteWall is already running (see the tray icon).", APP_NAME, MB_OK | MB_ICONINFORMATION); return 0; }
+    DWORD mutexErr = GetLastError();
+    g_showMsg = RegisterWindowMessageW(L"LiteWall.ShowLibrary");
+    if (mutexErr == ERROR_ALREADY_EXISTS) {
+        // Already running (window was closed to the tray): bring its library window back instead of erroring.
+        if (wcsstr(GetCommandLineW(), L"--tray")) return 0;
+        for (int tries = 0; tries < 50; tries++) {
+            HWND other = FindWindowW(L"LiteWallMsg", NULL);
+            if (other) {
+                DWORD pid = 0; GetWindowThreadProcessId(other, &pid);
+                if (pid) AllowSetForegroundWindow(pid);
+                PostMessageW(other, g_showMsg, 0, 0);
+                return 0;
+            }
+            Sleep(100);   // first instance may still be starting up
+        }
+        MessageBoxW(NULL, L"LiteWall is already running (see the tray icon).", APP_NAME, MB_OK | MB_ICONINFORMATION);
+        return 0;
+    }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
     load_settings();
@@ -617,7 +636,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
             g_logf = _wfopen(lp, L"w");
             OSVERSIONINFOW ov = {sizeof ov};
             typedef LONG(WINAPI * RtlGV)(OSVERSIONINFOW *); RtlGV rg = (RtlGV)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"); if (rg) rg(&ov);
-            LOG("LiteWall 0.3.3  cmdline=%ls", cl);
+            LOG("LiteWall 0.3.4  cmdline=%ls", cl);
             LOG("Windows %lu.%lu build %lu; settings file=%ls fill=%d mute=%d speed=%d", ov.dwMajorVersion, ov.dwMinorVersion, ov.dwBuildNumber, g_file, g_fill, g_mute, g_speedPct);
             DISPLAY_DEVICEW dd = {sizeof dd}; for (DWORD i = 0; EnumDisplayDevicesW(NULL, i, &dd, 0); i++) { if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) LOG("display %ls: %ls", dd.DeviceName, dd.DeviceString); dd.cb = sizeof dd; }
         }

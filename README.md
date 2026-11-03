@@ -17,7 +17,7 @@ This is a dark, native Win32 window, modeled on Wallpaper Engine. It opens when 
 
 ## Install
 
-1. Download `LiteWall-v0.3.3-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
+1. Download `LiteWall-v0.3.4-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
 2. Run `LiteWall.exe`, drag a video, GIF, or image into the library, and click **Apply**. That's the whole setup.
 3. Right-click the tray icon to change the wallpaper, pause, change auto-pause behavior, toggle **Start with Windows**, or quit.
 
