@@ -6,10 +6,19 @@ A tiny live-wallpaper app for Windows 10/11, meant as a lightweight Wallpaper En
 * **One window and one decoder per monitor.**
 * **Gets out of the way.** It runs at below-normal CPU priority and fully pauses when a game or other app is fullscreen or maximized, when the PC is locked, or (optionally) on battery.
 
+## Library window (v0.2.0)
+This is a dark, native Win32 window, modeled on Wallpaper Engine. It opens when LiteWall starts and when you left-click the tray icon.
+* Your wallpapers appear as a thumbnail grid. Thumbnails are the first frame (rendered by libmpv) and are cached in `%APPDATA%\LiteWall\thumbs`.
+* Use **+ Add wallpaper** or drag files onto the window. Files are copied into `%APPDATA%\LiteWall\library`.
+* The search box filters the grid by name.
+* The side panel shows a preview, the name, and the resolution. **Apply** sets the wallpaper on all monitors or just monitor N. Double-clicking a thumbnail also applies it. **Remove** (or the Del key) deletes it from your library.
+* Settings: Fill/fit, pause when maximized, pause on battery, start with Windows, mute, and playback speed.
+* Closing the window *destroys* it and frees all thumbnails and other UI resources, then trims memory. LiteWall stays in the tray. Starting with Windows launches it straight to the tray.
+
 ## Install
 
-1. Download `LiteWall-v0.1.0-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
-2. Run `LiteWall.exe` and pick a video, GIF, or image. That's the whole setup.
+1. Download `LiteWall-v0.2.0-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
+2. Run `LiteWall.exe`, drag a video, GIF, or image into the library, and click **Apply**. That's the whole setup.
 3. Right-click the tray icon to change the wallpaper, pause, change auto-pause behavior, toggle **Start with Windows**, or quit.
 
 Settings are saved to `%APPDATA%\LiteWall\settings.ini`. "Start with Windows" adds a per-user entry under `HKCU\...\Run`, and no admin rights are needed. To uninstall, untick Start with Windows, quit, and delete the folder.
@@ -35,7 +44,6 @@ Requires [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) in `third_party/ll
 
 ## Known limitations
 * No wallpaper "workshop" or interactive/web wallpapers. Only videos, GIFs, and images.
-* Every monitor shows the same file.
 * Frame rate follows the source file. Use a 30 fps file if you want even less GPU use.
 * Windows 11 24H2 changed the desktop window layout. LiteWall handles both layouts, but future Explorer updates could break this.
 * `libmpv-2.dll` is ~120 MB on disk because it bundles FFmpeg. Only the parts in use get loaded into RAM.

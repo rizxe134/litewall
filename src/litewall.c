@@ -14,12 +14,13 @@
 #include <stdio.h>
 #include <wchar.h>
 #include <mpv/client.h>
+#include <commctrl.h>
 
 #define APP_NAME L"LiteWall"
 #define WM_TRAY (WM_APP + 1)
 #define WM_MPV_WAKE (WM_APP + 2)
 #define ID_TIMER 1
-enum { IDM_CHOOSE = 100, IDM_PAUSE, IDM_STARTUP, IDM_BATTERY, IDM_MAXIMIZED, IDM_FIT, IDM_QUIT };
+enum { IDM_LIBRARY = 99, IDM_CHOOSE = 100, IDM_PAUSE, IDM_STARTUP, IDM_BATTERY, IDM_MAXIMIZED, IDM_FIT, IDM_QUIT };
 
 #define MAX_MON 8
 typedef struct { HWND hwnd; mpv_handle *mpv; RECT rc; int paused; } Screen;
@@ -35,25 +36,34 @@ static wchar_t g_ini[MAX_PATH];
 static wchar_t g_file[MAX_PATH * 2];
 static int g_userPaused, g_locked, g_pauseOnBattery = 1, g_pauseOnMaximized = 1, g_fill = 1;
 static int g_allPaused = -1;
+static wchar_t g_monFile[MAX_MON][MAX_PATH * 2]; // per-monitor override ("" = use g_file)
+static int g_mute = 1, g_speedPct = 100;
+static wchar_t g_appdir[MAX_PATH];
+static const wchar_t *screen_file(int i) { return (i < MAX_MON && g_monFile[i][0]) ? g_monFile[i] : g_file; }
+static void ui_open(void);
 
 /* ---------- settings ---------- */
 static void load_settings(void) {
     wchar_t dir[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, dir))) {
         wcscat(dir, L"\\LiteWall"); CreateDirectoryW(dir, NULL);
-        swprintf(g_ini, MAX_PATH, L"%s\\settings.ini", dir);
+        swprintf(g_ini, MAX_PATH, L"%s\\settings.ini", dir); wcscpy(g_appdir, dir);
     }
     GetPrivateProfileStringW(L"main", L"file", L"", g_file, MAX_PATH * 2, g_ini);
     g_userPaused = GetPrivateProfileIntW(L"main", L"paused", 0, g_ini);
     g_pauseOnBattery = GetPrivateProfileIntW(L"main", L"pause_on_battery", 1, g_ini);
     g_pauseOnMaximized = GetPrivateProfileIntW(L"main", L"pause_on_maximized", 1, g_ini);
     g_fill = GetPrivateProfileIntW(L"main", L"fill", 1, g_ini);
+    g_mute = GetPrivateProfileIntW(L"main", L"mute", 1, g_ini);
+    g_speedPct = GetPrivateProfileIntW(L"main", L"speed_pct", 100, g_ini);
+    for (int i = 0; i < MAX_MON; i++) { wchar_t k[16]; swprintf(k, 16, L"file%d", i); GetPrivateProfileStringW(L"main", k, L"", g_monFile[i], MAX_PATH * 2, g_ini); }
 }
 static void save_int(const wchar_t *k, int v) { wchar_t b[16]; swprintf(b, 16, L"%d", v); WritePrivateProfileStringW(L"main", k, b, g_ini); }
 static void save_settings(void) {
     WritePrivateProfileStringW(L"main", L"file", g_file, g_ini);
     save_int(L"paused", g_userPaused); save_int(L"pause_on_battery", g_pauseOnBattery);
-    save_int(L"pause_on_maximized", g_pauseOnMaximized); save_int(L"fill", g_fill);
+    save_int(L"pause_on_maximized", g_pauseOnMaximized); save_int(L"fill", g_fill); save_int(L"mute", g_mute); save_int(L"speed_pct", g_speedPct);
+    for (int i = 0; i < MAX_MON; i++) { wchar_t k[16]; swprintf(k, 16, L"file%d", i); WritePrivateProfileStringW(L"main", k, g_monFile[i], g_ini); }
 }
 
 /* ---------- start with Windows ---------- */
@@ -69,8 +79,8 @@ static void set_startup(int on) {
     HKEY k;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, RUNKEY, 0, KEY_SET_VALUE, &k) != ERROR_SUCCESS) return;
     if (on) {
-        wchar_t exe[MAX_PATH], v[MAX_PATH + 4];
-        GetModuleFileNameW(NULL, exe, MAX_PATH); swprintf(v, MAX_PATH + 4, L"\"%s\"", exe);
+        wchar_t exe[MAX_PATH], v[MAX_PATH + 16];
+        GetModuleFileNameW(NULL, exe, MAX_PATH); swprintf(v, MAX_PATH + 16, L"\"%s\" --tray", exe);
         RegSetValueExW(k, APP_NAME, 0, REG_SZ, (BYTE *)v, (DWORD)((wcslen(v) + 1) * sizeof(wchar_t)));
     } else RegDeleteValueW(k, APP_NAME);
     RegCloseKey(k);
@@ -104,8 +114,9 @@ static void on_mpv_wakeup(void *ctx) { PostMessageW(g_msg, WM_MPV_WAKE, 0, (LPAR
 static void to_utf8(const wchar_t *w, char *out, int n) { WideCharToMultiByte(CP_UTF8, 0, w, -1, out, n, NULL, NULL); }
 
 static void mpv_load(Screen *s) {
-    if (!s->mpv || !g_file[0]) return;
-    char path[MAX_PATH * 6]; to_utf8(g_file, path, sizeof path);
+    const wchar_t *f = screen_file((int)(s - g_scr));
+    if (!s->mpv || !f[0]) return;
+    char path[MAX_PATH * 6]; to_utf8(f, path, sizeof path);
     const char *cmd[] = {"loadfile", path, NULL};
     mpv_command_async(s->mpv, 0, cmd);
 }
@@ -120,7 +131,7 @@ static mpv_handle *mpv_start(HWND wnd) {
         {"input-default-bindings", "no"}, {"input-vo-keyboard", "no"}, {"input-cursor", "no"},
         {"cursor-autohide", "no"}, {"osc", "no"}, {"osd-level", "0"}, {"ytdl", "no"},
         {"load-scripts", "no"}, {"load-stats-overlay", "no"}, {"load-console", "no"},
-        {"audio", "no"}, {"sub-auto", "no"}, {"load-auto-profiles", "no"},
+        {"sub-auto", "no"}, {"load-auto-profiles", "no"},
         {"hwdec", "auto-safe"},                 // D3D11VA/DXVA2/NVDEC hardware decoding
         {"hwdec-codecs", "all"},
         {"vo", "gpu"}, {"gpu-api", "d3d11"}, {"profile", "fast"},
@@ -136,6 +147,8 @@ static mpv_handle *mpv_start(HWND wnd) {
     };
     for (size_t i = 0; i < sizeof opts / sizeof opts[0]; i++) mpv_set_option_string(m, opts[i][0], opts[i][1]);
     mpv_set_option_string(m, "panscan", g_fill ? "1.0" : "0.0");
+    mpv_set_option_string(m, "aid", g_mute ? "no" : "auto");
+    { double sp = g_speedPct / 100.0; mpv_set_option(m, "speed", MPV_FORMAT_DOUBLE, &sp); }
     if (mpv_initialize(m) < 0) { mpv_terminate_destroy(m); return NULL; }
     mpv_set_wakeup_callback(m, on_mpv_wakeup, m);
     return m;
@@ -164,7 +177,8 @@ static void destroy_screens(void) {
 
 static void create_screens(void) {
     destroy_screens();
-    if (!g_file[0]) return;
+    int any = g_file[0] != 0; for (int i = 0; i < MAX_MON; i++) any |= g_monFile[i][0] != 0;
+    if (!any) return;
     HWND parent = get_wallpaper_parent();
     EnumDisplayMonitors(NULL, NULL, enum_mon, 0);
     for (int i = 0; i < g_nscr; i++) {
@@ -174,6 +188,7 @@ static void create_screens(void) {
         s->hwnd = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"LiteWallSurface", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                                   p.x, p.y, s->rc.right - s->rc.left, s->rc.bottom - s->rc.top, parent, NULL, g_inst, NULL);
         if (!s->hwnd) continue;
+        if (!screen_file(i)[0]) { ShowWindow(s->hwnd, SW_HIDE); continue; }
         // Win11 24H2: keep our surface beneath the icon view inside Progman.
         SetWindowPos(s->hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         s->mpv = mpv_start(s->hwnd);
@@ -263,7 +278,8 @@ static int choose_file(HWND owner) {
 
 static void show_menu(HWND h) {
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, IDM_CHOOSE, L"Choose wallpaper...");
+    AppendMenuW(m, MF_STRING | MF_DEFAULT, IDM_LIBRARY, L"Open library...");
+    AppendMenuW(m, MF_STRING, IDM_CHOOSE, L"Choose file...");
     AppendMenuW(m, MF_STRING | (g_userPaused ? MF_CHECKED : 0), IDM_PAUSE, L"Pause");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING | (g_fill ? MF_CHECKED : 0), IDM_FIT, L"Fill screen (crop)");
@@ -284,15 +300,18 @@ static void restore_static_wallpaper(void) {
     SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, wp, SPIF_SENDCHANGE);
 }
 
+#include "ui.c"
+
 static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == g_taskbarCreated && msg) { tray_add(); create_screens(); return 0; } // Explorer restarted
     switch (msg) {
     case WM_TRAY:
-        if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_LBUTTONUP) show_menu(h);
+        if (LOWORD(lp) == WM_RBUTTONUP) show_menu(h); else if (LOWORD(lp) == WM_LBUTTONUP) ui_open();
         return 0;
     case WM_COMMAND:
         switch (LOWORD(wp)) {
-        case IDM_CHOOSE: if (choose_file(h)) create_screens(); break;
+        case IDM_LIBRARY: ui_open(); return 0;
+        case IDM_CHOOSE: if (choose_file(h)) { memset(g_monFile, 0, sizeof g_monFile); save_settings(); create_screens(); } break;
         case IDM_PAUSE: g_userPaused = !g_userPaused; save_settings(); break;
         case IDM_FIT: g_fill = !g_fill; save_settings();
             for (int i = 0; i < g_nscr; i++) if (g_scr[i].mpv) mpv_set_property_string(g_scr[i].mpv, "panscan", g_fill ? "1.0" : "0.0");
@@ -354,12 +373,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     tray_add();
     WTSRegisterSessionNotification(g_msg, NOTIFY_FOR_THIS_SESSION);
 
-    if (!g_file[0] || GetFileAttributesW(g_file) == INVALID_FILE_ATTRIBUTES) {
-        if (!choose_file(NULL)) {
-            MessageBoxW(NULL, L"No wallpaper chosen. LiteWall stays in the tray - right-click its icon to pick one.", APP_NAME, MB_OK | MB_ICONINFORMATION);
-        }
-    }
+    { INITCOMMONCONTROLSEX ic = {sizeof ic, ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES}; InitCommonControlsEx(&ic); }
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     create_screens();
+    if (!wcsstr(GetCommandLineW(), L"--tray")) ui_open();   // autostart passes --tray
     apply_pause();
     SetTimer(g_msg, ID_TIMER, 1000, NULL);  // 1 Hz check - negligible cost
 
