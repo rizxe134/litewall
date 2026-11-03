@@ -1,0 +1,7 @@
+build/
+dist/
+third_party/
+*.zip
+*.7z
+*.dll
+*.exe
