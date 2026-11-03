@@ -26,7 +26,8 @@ enum { IDM_LIBRARY = 99, IDM_CHOOSE = 100, IDM_PAUSE, IDM_STARTUP, IDM_BATTERY, 
 #define MAX_MON 8
 typedef struct { HWND hwnd; RECT rc, wr; int paused; int grp; } Screen; // rc = monitor, wr = our window
 /* diagnostics / A-B modes (v0.2.3-diag) */
-enum { MODE_PERMON = 1, MODE_SPAN = 2 };
+enum { MODE_TILE = 0, MODE_PERMON = 1, MODE_SPAN = 2 };
+static int g_gameActive;   // a fullscreen app / game is up (drives encoder pausing)
 static void opt_kick(void);
 static int g_optimize = 1, g_spanSetting = 0;
 static int g_mode = MODE_PERMON, g_log = 0, g_noVideo = 0, g_statTicks = 0;
@@ -146,7 +147,7 @@ static void setopt(mpv_handle *m, const char *k, const char *v) {
     int e = mpv_set_option_string(m, k, v);
     if (e < 0) LOG("mpv option REJECTED %s=%s (%s)", k, v, mpv_error_string(e));
 }
-static mpv_handle *mpv_start(HWND wid_wnd) {
+static mpv_handle *mpv_start(HWND wid_wnd, const wchar_t *shader) {
     mpv_handle *m = mpv_create();
     if (!m) return NULL;
     static const char *opts[][2] = {
@@ -169,7 +170,11 @@ static mpv_handle *mpv_start(HWND wid_wnd) {
     };
     for (size_t i = 0; i < sizeof opts / sizeof opts[0]; i++) setopt(m, opts[i][0], opts[i][1]);
     int64_t wid = (int64_t)(intptr_t)wid_wnd; mpv_set_option(m, "wid", MPV_FORMAT_INT64, &wid);
-    setopt(m, "panscan", g_fill ? "1.0" : "0.0");
+    if (shader) {   // tile mode: our GPU shader lays out one full picture per monitor on a single canvas
+        char sp8[MAX_PATH * 6]; to_utf8(shader, sp8, sizeof sp8);
+        setopt(m, "glsl-shaders", sp8); setopt(m, "keepaspect", "no"); setopt(m, "panscan", "0.0");
+    } else setopt(m, "panscan", g_fill ? "1.0" : "0.0");
+    setopt(m, "gpu-shader-cache", "no"); setopt(m, "icc-profile-auto", "no");
     setopt(m, "aid", g_mute ? "no" : "auto");
     { double sp = g_speedPct / 100.0; mpv_set_option(m, "speed", MPV_FORMAT_DOUBLE, &sp); }
     if (mpv_initialize(m) < 0) { LOG("mpv_initialize FAILED"); mpv_terminate_destroy(m); return NULL; }
@@ -244,6 +249,35 @@ static void reattach_screens(void) {
     request_redraw();
 }
 
+/* Tile mode: one player, one window covering the bounding box of the monitors that share a file.
+   A user shader on MAIN resizes the frame to the canvas and, per output pixel, samples the video
+   with cover (fill) or fit mapping for whichever monitor that pixel belongs to. GPU-only work. */
+static const wchar_t *write_tile_shader(int grp, const RECT *box, wchar_t *path) {
+    int n = 0; for (int i = 0; i < g_nscr; i++) if (g_scr[i].grp == grp) n++;
+    if (n < 2) return NULL;                       // single monitor: plain playback, no shader
+    swprintf(path, MAX_PATH, L"%s\\tile%d.glsl", g_appdir, grp);
+    FILE *f = _wfopen(path, L"w"); if (!f) return NULL;
+    int W = box->right - box->left, H = box->bottom - box->top;
+    fprintf(f, "//!HOOK MAIN\n//!BIND HOOKED\n//!WIDTH %d\n//!HEIGHT %d\n//!DESC LiteWall per-monitor layout\n\n", W, H);
+    fprintf(f, "vec4 lw_tile(vec2 px, vec4 r, float va) {\n"
+               "    vec2 l = (px - r.xy) / r.zw; float ma = r.z / r.w; vec2 uv = l;\n");
+    if (g_fill) fprintf(f, "    if (ma > va) uv.y = 0.5 + (l.y - 0.5) * (va / ma); else uv.x = 0.5 + (l.x - 0.5) * (ma / va);\n");
+    else fprintf(f, "    if (ma > va) uv.x = 0.5 + (l.x - 0.5) * (ma / va); else uv.y = 0.5 + (l.y - 0.5) * (va / ma);\n"
+                    "    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec4(0.0, 0.0, 0.0, 1.0);\n");
+    fprintf(f, "    return HOOKED_tex(uv);\n}\n\nvec4 hook() {\n    vec2 px = HOOKED_pos * vec2(%d.0, %d.0);\n"
+               "    float va = HOOKED_size.x / HOOKED_size.y;\n", W, H);
+    for (int i = 0; i < g_nscr; i++) if (g_scr[i].grp == grp) {
+        RECT m = g_scr[i].rc;
+        int x = m.left - box->left, y = m.top - box->top, w = m.right - m.left, h = m.bottom - m.top;
+        fprintf(f, "    if (px.x >= %d.0 && px.x < %d.0 && px.y >= %d.0 && px.y < %d.0) return lw_tile(px, vec4(%d.0, %d.0, %d.0, %d.0), va);\n",
+                x, x + w, y, y + h, x, y, w, h);
+        LOG("tile: monitor %d -> canvas rect (%d,%d) %dx%d of %dx%d", i, x, y, w, h, W, H);
+    }
+    fprintf(f, "    return vec4(0.0, 0.0, 0.0, 1.0);\n}\n");
+    fclose(f);
+    return path;
+}
+
 static void create_screens(void) {
     destroy_screens();
     if (g_noVideo) { LOG("--no-video: not creating wallpaper"); return; }
@@ -253,9 +287,11 @@ static void create_screens(void) {
     { wchar_t c[64] = L""; GetClassNameW(parent, c, 64); RECT pr; GetWindowRect(parent, &pr);
       LOG("wallpaper host hwnd=%p class=%ls rect=(%ld,%ld)-(%ld,%ld)", (void *)parent, c, pr.left, pr.top, pr.right, pr.bottom); }
     EnumDisplayMonitors(NULL, NULL, enum_mon, 0);
-    g_mode = g_spanSetting ? MODE_SPAN : MODE_PERMON;
-    if (wcsstr(GetCommandLineW(), L"--span")) g_mode = MODE_SPAN; else if (wcsstr(GetCommandLineW(), L"--per-monitor")) g_mode = MODE_PERMON;
-    LOG("mode=%s monitors=%d", g_mode == MODE_SPAN ? "span" : "per-monitor", g_nscr);
+    g_mode = g_spanSetting ? MODE_SPAN : MODE_TILE;
+    if (wcsstr(GetCommandLineW(), L"--span")) g_mode = MODE_SPAN;
+    else if (wcsstr(GetCommandLineW(), L"--per-monitor")) g_mode = MODE_PERMON;
+    else if (wcsstr(GetCommandLineW(), L"--tile")) g_mode = MODE_TILE;
+    LOG("mode=%s monitors=%d", g_mode == MODE_SPAN ? "span" : g_mode == MODE_TILE ? "tile (1 player, GPU shader per-monitor layout)" : "per-monitor", g_nscr);
     // 1) group monitors by file (per-monitor mode: every monitor is its own group)
     for (int i = 0; i < g_nscr; i++) {
         Screen *s = &g_scr[i]; const wchar_t *f = screen_file(i);
@@ -271,16 +307,21 @@ static void create_screens(void) {
     // 2) windows: one per monitor, or (span) one per group covering the union of its monitors
     HWND gwnd[MAX_GRP] = {0};
     g_maxW = g_maxH = 0;
+    if (g_mode != MODE_SPAN)   // optimize target: big enough to cover the largest monitor (physical pixels)
+        for (int i = 0; i < g_nscr; i++) if (g_scr[i].grp >= 0) {
+            int w = g_scr[i].rc.right - g_scr[i].rc.left, h = g_scr[i].rc.bottom - g_scr[i].rc.top;
+            if (w > g_maxW) g_maxW = w;
+            if (h > g_maxH) g_maxH = h;
+        }
     for (int i = 0; i < g_nscr; i++) {
         Screen *s = &g_scr[i];
         if (s->grp < 0) continue;
-        if (g_mode == MODE_SPAN) {
+        if (g_mode != MODE_PERMON) {   // span + tile: one window per group covering all its monitors
             if (gwnd[s->grp]) continue;
             for (int j = 0; j < g_nscr; j++) if (g_scr[j].grp == s->grp) UnionRect(&s->wr, &s->wr, &g_scr[j].rc);
         }
         int w = s->wr.right - s->wr.left, h = s->wr.bottom - s->wr.top;
-        if (w > g_maxW) g_maxW = w;
-        if (h > g_maxH) g_maxH = h;
+        if (g_mode == MODE_SPAN) { if (w > g_maxW) g_maxW = w; if (h > g_maxH) g_maxH = h; }
         POINT p = {s->wr.left, s->wr.top};
         MapWindowPoints(HWND_DESKTOP, parent, &p, 1);
         s->hwnd = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"LiteWallSurface", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
@@ -295,7 +336,9 @@ static void create_screens(void) {
         Screen *s = &g_scr[i];
         if (!s->hwnd) continue;
         Group *G = &g_grp[s->grp];
-        G->mpv = mpv_start(s->hwnd);
+        wchar_t shp[MAX_PATH]; const wchar_t *sh = NULL;
+        if (g_mode == MODE_TILE) sh = write_tile_shader(s->grp, &s->wr, shp);
+        G->mpv = mpv_start(s->hwnd, sh);
         if (G->mpv) mpv_load_group(G, g_maxW, g_maxH);
         LOG("player for monitor %d: %s", i, G->mpv ? "ok" : "FAILED");
     }
@@ -336,10 +379,15 @@ static int is_shell_window(HWND w) {
 }
 
 // Does a visible top-level window cover (fullscreen) or maximize onto this monitor?
-typedef struct { RECT mon; int covered; } CoverCtx;
+typedef struct { RECT mon; int covered, full; wchar_t why[160]; } CoverCtx;
 static BOOL CALLBACK cover_enum(HWND w, LPARAM lp) {
     CoverCtx *c = (CoverCtx *)lp;
     if (!IsWindowVisible(w) || IsIconic(w) || is_shell_window(w)) return TRUE;
+    LONG ex = GetWindowLongW(w, GWL_EXSTYLE);
+    if (ex & WS_EX_TRANSPARENT) return TRUE;                          // click-through overlays (GPU/Steam/Discord)
+    if ((ex & WS_EX_NOACTIVATE) && (ex & WS_EX_TOOLWINDOW)) return TRUE;
+    { DWORD pid; GetWindowThreadProcessId(w, &pid); if (pid == GetCurrentProcessId()) return TRUE; } // our own windows
+    { BYTE a = 255; DWORD fl = 0; if ((ex & WS_EX_LAYERED) && GetLayeredWindowAttributes(w, NULL, &a, &fl) && (fl & LWA_ALPHA) && a < 32) return TRUE; }
     BOOL cloaked = FALSE;
     typedef HRESULT(WINAPI * DwmGetAttr)(HWND, DWORD, PVOID, DWORD);
     static DwmGetAttr dga; static int tried;
@@ -349,37 +397,53 @@ static BOOL CALLBACK cover_enum(HWND w, LPARAM lp) {
     RECT r; if (!GetWindowRect(w, &r)) return TRUE;
     int full = r.left <= c->mon.left && r.top <= c->mon.top && r.right >= c->mon.right && r.bottom >= c->mon.bottom;
     int maxed = g_pauseOnMaximized && IsZoomed(w) && MonitorFromWindow(w, MONITOR_DEFAULTTONULL) == MonitorFromRect(&c->mon, MONITOR_DEFAULTTONULL);
-    if (full || maxed) { c->covered = 1; return FALSE; }
+    if (full || maxed) {
+        c->covered = 1; c->full |= full;
+        if (g_logf) { wchar_t cls[64], t[64]; GetClassNameW(w, cls, 64); GetWindowTextW(w, t, 64); swprintf(c->why, 160, L"%s by [%s] \"%s\"", full ? L"fullscreen" : L"maximized", cls, t); }
+        return FALSE;
+    }
     return TRUE;
 }
 
 static void apply_pause(void) {
-    int global = g_userPaused || g_locked;
-    if (!global && g_pauseOnBattery) {
+    const char *why = NULL; int game = 0;
+    if (g_userPaused) why = "paused from tray";
+    else if (g_locked) why = "session locked";
+    if (!why && g_pauseOnBattery) {
         SYSTEM_POWER_STATUS ps;
-        if (GetSystemPowerStatus(&ps) && ps.ACLineStatus == 0) global = 1;
+        if (GetSystemPowerStatus(&ps) && ps.ACLineStatus == 0) why = "on battery";
     }
-    if (!global) {
-        QUERY_USER_NOTIFICATION_STATE st;
-        if (SUCCEEDED(SHQueryUserNotificationState(&st)) &&
-            (st == QUNS_RUNNING_D3D_FULL_SCREEN || st == QUNS_PRESENTATION_MODE)) global = 1; // exclusive-fullscreen games
+    QUERY_USER_NOTIFICATION_STATE st;
+    if (SUCCEEDED(SHQueryUserNotificationState(&st)) && (st == QUNS_RUNNING_D3D_FULL_SCREEN || st == QUNS_PRESENTATION_MODE)) {
+        game = 1; if (!why) why = st == QUNS_RUNNING_D3D_FULL_SCREEN ? "exclusive-fullscreen D3D app" : "presentation mode";
     }
+    int global = why != NULL;
     int all = 1;
+    static char lastWhy[8][200];
     for (int i = 0; i < g_nscr; i++) {
         Screen *s = &g_scr[i];
-        int want = global;
-        if (!want) { CoverCtx c = {s->rc, 0}; EnumWindows(cover_enum, (LPARAM)&c); want = c.covered; }
+        CoverCtx c; memset(&c, 0, sizeof c); c.mon = s->rc;
+        EnumWindows(cover_enum, (LPARAM)&c);
+        game |= c.full;
+        int want = global || c.covered;
+        if (g_logf && i < 8) {
+            char cur[200];
+            if (global) snprintf(cur, sizeof cur, "%s", why); else if (c.covered) snprintf(cur, sizeof cur, "%ls", c.why); else cur[0] = 0;
+            if (strcmp(cur, lastWhy[i])) { LOG("monitor %d %s%s", i, cur[0] ? "PAUSE: " : "resume", cur); strcpy(lastWhy[i], cur); }
+        }
         s->paused = want;
         all &= want;
     }
-    // A shared player pauses only when every monitor it feeds is paused; covered monitors just stop drawing.
+    g_gameActive = game;   // the optimizer only yields to real fullscreen apps, not battery/lock/maximized
+    // A shared player pauses only when every monitor it feeds is paused.
     for (int g = 0; g < g_ngrp; g++) {
-        int gp = 1; for (int i = 0; i < g_nscr; i++) if (g_scr[i].grp == g) gp &= g_scr[i].paused == 1;
+        int gp = 1, any = 0; for (int i = 0; i < g_nscr; i++) if (g_scr[i].grp == g) { gp &= g_scr[i].paused == 1; any = 1; }
+        if (!any) gp = 0;
         if (gp != g_grp[g].paused && g_grp[g].mpv) { int f = gp; mpv_set_property(g_grp[g].mpv, "pause", MPV_FORMAT_FLAG, &f); g_grp[g].paused = gp; }
     }
+    if (!g_nscr) all = 0;
     if (all != g_allPaused) {
         g_allPaused = all;
-        // While everything is paused: ask Windows for EcoQoS + trim the working set.
         PROCESS_POWER_THROTTLING_STATE t = {PROCESS_POWER_THROTTLING_CURRENT_VERSION,
                                             PROCESS_POWER_THROTTLING_EXECUTION_SPEED, all ? PROCESS_POWER_THROTTLING_EXECUTION_SPEED : 0};
         SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &t, sizeof t);
@@ -449,7 +513,7 @@ static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_CHOOSE: if (choose_file(h)) { memset(g_monFile, 0, sizeof g_monFile); save_settings(); create_screens(); } break;
         case IDM_PAUSE: g_userPaused = !g_userPaused; save_settings(); break;
         case IDM_FIT: g_fill = !g_fill; save_settings();
-            players_set_string("panscan", g_fill ? "1.0" : "0.0"); request_redraw();
+            players_set_string("panscan", g_fill ? "1.0" : "0.0"); if (g_mode == MODE_TILE) create_screens();
             break;
         case IDM_MAXIMIZED: g_pauseOnMaximized = !g_pauseOnMaximized; save_settings(); break;
         case IDM_BATTERY: g_pauseOnBattery = !g_pauseOnBattery; save_settings(); break;
@@ -514,7 +578,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
             g_logf = _wfopen(lp, L"w");
             OSVERSIONINFOW ov = {sizeof ov};
             typedef LONG(WINAPI * RtlGV)(OSVERSIONINFOW *); RtlGV rg = (RtlGV)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"); if (rg) rg(&ov);
-            LOG("LiteWall 0.3.0  cmdline=%ls", cl);
+            LOG("LiteWall 0.3.1  cmdline=%ls", cl);
             LOG("Windows %lu.%lu build %lu; settings file=%ls fill=%d mute=%d speed=%d", ov.dwMajorVersion, ov.dwMinorVersion, ov.dwBuildNumber, g_file, g_fill, g_mute, g_speedPct);
             DISPLAY_DEVICEW dd = {sizeof dd}; for (DWORD i = 0; EnumDisplayDevicesW(NULL, i, &dd, 0); i++) { if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) LOG("display %ls: %ls", dd.DeviceName, dd.DeviceString); dd.cb = sizeof dd; }
         }

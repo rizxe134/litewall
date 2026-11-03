@@ -17,7 +17,7 @@ This is a dark, native Win32 window, modeled on Wallpaper Engine. It opens when 
 
 ## Install
 
-1. Download `LiteWall-v0.3.0-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
+1. Download `LiteWall-v0.3.1-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
 2. Run `LiteWall.exe`, drag a video, GIF, or image into the library, and click **Apply**. That's the whole setup.
 3. Right-click the tray icon to change the wallpaper, pause, change auto-pause behavior, toggle **Start with Windows**, or quit.
 
@@ -29,6 +29,8 @@ A 4K video on 1080p screens wastes memory: each player keeps 4K decoder surfaces
 * Encoding pauses whenever a game or fullscreen app is running.
 * Progress appears under the thumbnail.
 * If you connect a bigger monitor, the copy is re-made at the new size.
+
+**One player for all monitors** (v0.3.1, default): when several monitors show the same wallpaper, LiteWall runs a single player in one window that covers them all. A small GPU shader draws the full picture onto each monitor's area, so every screen shows the whole wallpaper while there's only one decoder and one swapchain. Use `--per-monitor` to fall back to one player per screen.
 
 **Span across monitors** (setting): one player covers all your monitors with a single stretched picture. This uses the least memory, but each screen shows only part of the image.
 

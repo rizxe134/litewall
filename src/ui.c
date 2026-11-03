@@ -412,7 +412,7 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         else if (code == BN_CLICKED && id >= IDC_FILL && id <= IDC_MUTE) {
             int on = IsDlgButtonChecked(h, id) == BST_CHECKED;
-            if (id == IDC_FILL) { g_fill = on; players_set_string("panscan", on ? "1.0" : "0.0"); request_redraw(); }
+            if (id == IDC_FILL) { g_fill = on; players_set_string("panscan", on ? "1.0" : "0.0"); if (g_mode == MODE_TILE) create_screens(); }
             if (id == IDC_PMAX) g_pauseOnMaximized = on;
             if (id == IDC_PBAT) g_pauseOnBattery = on;
             if (id == IDC_START) set_startup(on);

@@ -93,8 +93,8 @@ static int opt_encode(const wchar_t *src, const wchar_t *dst, int ow, int oh, co
             }
             if (e->event_id == MPV_EVENT_SHUTDOWN) break;
             double pct = 0; if (mpv_get_property(m, "percent-pos", MPV_FORMAT_DOUBLE, &pct) >= 0) InterlockedExchange(&g_optPct, (LONG)pct);
-            int want = g_allPaused == 1;   // a game / fullscreen app is up: stop encoding until it's gone
-            if (want != paused) { mpv_set_property(m, "pause", MPV_FORMAT_FLAG, &want); paused = want; LOG("encode %s", want ? "paused (fullscreen app)" : "resumed"); }
+            int want = g_gameActive;   // a game / fullscreen app is up: stop encoding until it's gone
+            if (want != paused) { mpv_set_property(m, "pause", MPV_FORMAT_FLAG, &want); paused = want; LOG("encode %s", want ? "paused (fullscreen app/game detected; see monitor PAUSE lines)" : "resumed"); }
         }
     }
     mpv_terminate_destroy(m);
