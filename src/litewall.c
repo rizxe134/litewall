@@ -345,13 +345,18 @@ static void create_screens(void) {
     }
     // 2) windows: one per monitor, or (span) one per group covering the union of its monitors
     HWND gwnd[MAX_GRP] = {0};
-    g_maxW = g_maxH = 0;
-    if (g_mode != MODE_SPAN)   // optimize target: big enough to cover the largest monitor (physical pixels)
-        for (int i = 0; i < g_nscr; i++) if (g_scr[i].grp >= 0) {
-            int w = g_scr[i].rc.right - g_scr[i].rc.left, h = g_scr[i].rc.bottom - g_scr[i].rc.top;
-            if (w > g_maxW) g_maxW = w;
-            if (h > g_maxH) g_maxH = h;
-        }
+    {   // optimize target: big enough to cover the largest monitor (physical pixels). Computed in locals
+        // and published once so the optimizer thread never sees a half-built value.
+        int mw = 0, mh = 0;
+        if (g_mode != MODE_SPAN)
+            for (int i = 0; i < g_nscr; i++) if (g_scr[i].grp >= 0) {
+                int w = g_scr[i].rc.right - g_scr[i].rc.left, h = g_scr[i].rc.bottom - g_scr[i].rc.top;
+                if (w > mw) mw = w;
+                if (h > mh) mh = h;
+            }
+        if (g_mode != MODE_SPAN) { g_maxW = mw; g_maxH = mh; }
+    }
+    int spW = 0, spH = 0;
     for (int i = 0; i < g_nscr; i++) {
         Screen *s = &g_scr[i];
         if (s->grp < 0) continue;
@@ -360,7 +365,7 @@ static void create_screens(void) {
             for (int j = 0; j < g_nscr; j++) if (g_scr[j].grp == s->grp) UnionRect(&s->wr, &s->wr, &g_scr[j].rc);
         }
         int w = s->wr.right - s->wr.left, h = s->wr.bottom - s->wr.top;
-        if (g_mode == MODE_SPAN) { if (w > g_maxW) g_maxW = w; if (h > g_maxH) g_maxH = h; }
+        if (g_mode == MODE_SPAN) { if (w > spW) spW = w; if (h > spH) spH = h; }
         POINT p = {s->wr.left, s->wr.top};
         MapWindowPoints(HWND_DESKTOP, parent, &p, 1);
         s->hwnd = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"LiteWallSurface", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
@@ -370,6 +375,7 @@ static void create_screens(void) {
         LOG("window for monitor %d (group %d): screen (%ld,%ld) %dx%d -> parent-client (%ld,%ld)", i, s->grp, s->wr.left, s->wr.top, w, h, p.x, p.y);
         if (!gwnd[s->grp]) gwnd[s->grp] = s->hwnd;
     }
+    if (g_mode == MODE_SPAN && spW > 0) { g_maxW = spW; g_maxH = spH; }
     // 3) players: one mpv per window. Optimized copy is made for the largest target, shared by all.
     for (int i = 0; i < g_nscr; i++) {
         Screen *s = &g_scr[i];
@@ -769,6 +775,11 @@ static LRESULT CALLBACK msg_proc_wrap(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     (void)prev; (void)cmd; (void)show;
     g_inst = inst;
+    {   // helper mode (optimizer child process): no mutex, tray, windows or UI
+        int argc; LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv && argc >= 2 && (!wcscmp(argv[1], L"--encode") || !wcscmp(argv[1], L"--probe"))) { int r = helper_main(argc, argv); LocalFree(argv); return r; }
+        LocalFree(argv);
+    }
     HANDLE mutex = CreateMutexW(NULL, TRUE, L"LiteWall.SingleInstance");
     DWORD mutexErr = GetLastError();
     g_showMsg = RegisterWindowMessageW(L"LiteWall.ShowLibrary");

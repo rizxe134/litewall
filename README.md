@@ -36,7 +36,8 @@ A 4K video on 1080p screens wastes memory: each player keeps 4K decoder surfaces
 * Encoders are tried in this order: AMD AMF, NVIDIA NVENC, Intel QSV, Media Foundation, then x264 (CPU).
 * Encoding pauses whenever a game or fullscreen app is running.
 * Progress appears under the thumbnail.
-* If you connect a bigger monitor, the copy is re-made at the new size.
+* If you connect a bigger monitor, the copy is re-made at the new size. The previous copy is kept, so switching back doesn't re-encode.
+* Probing and encoding run in a separate helper process (`LiteWall.exe --encode ...`) at idle priority with Efficiency mode. The helper is stopped while a game runs and when LiteWall quits, so LiteWall's own memory stays flat during imports. With `--log`, the helper writes `%APPDATA%\LiteWall\encode.log`.
 
 **One player for all monitors** (v0.3.1, default): when several monitors show the same wallpaper, LiteWall runs a single player in one window that covers them all. A small GPU shader draws the full picture onto each monitor's area, so every screen shows the whole wallpaper while there's only one decoder and one swapchain. Use `--per-monitor` to fall back to one player per screen.
 
