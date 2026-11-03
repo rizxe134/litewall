@@ -28,6 +28,7 @@ typedef struct { HWND hwnd; RECT rc, wr; int paused; int grp; } Screen; // rc = 
 /* diagnostics / A-B modes (v0.2.3-diag) */
 enum { MODE_TILE = 0, MODE_PERMON = 1, MODE_SPAN = 2 };
 static int g_gameActive;
+static int g_fpsCap = 30, g_canvasPct = 75, g_cliCanvas = -1, g_cliFps = -1;   // fps cap (0 = source), tile canvas internal scale %
 static char g_mpvOpts[2048];   // --mpv-opts "k=v,k=v" passthrough (A/B testing)
 static int g_statSecs = 30, g_exitAfterStats;
 static double g_sumPriv, g_sumCpu; static int g_nSum;   // a fullscreen app / game is up (drives encoder pausing)
@@ -76,13 +77,15 @@ static void load_settings(void) {
     g_speedPct = GetPrivateProfileIntW(L"main", L"speed_pct", 100, g_ini);
     g_optimize = GetPrivateProfileIntW(L"main", L"optimize", 1, g_ini);
     g_spanSetting = GetPrivateProfileIntW(L"main", L"span", 0, g_ini);
+    g_fpsCap = GetPrivateProfileIntW(L"main", L"fps_cap", 30, g_ini);
+    g_canvasPct = GetPrivateProfileIntW(L"main", L"canvas_pct", 75, g_ini);
     for (int i = 0; i < MAX_MON; i++) { wchar_t k[16]; swprintf(k, 16, L"file%d", i); GetPrivateProfileStringW(L"main", k, L"", g_monFile[i], MAX_PATH * 2, g_ini); }
 }
 static void save_int(const wchar_t *k, int v) { wchar_t b[16]; swprintf(b, 16, L"%d", v); WritePrivateProfileStringW(L"main", k, b, g_ini); }
 static void save_settings(void) {
     WritePrivateProfileStringW(L"main", L"file", g_file, g_ini);
     save_int(L"paused", g_userPaused); save_int(L"pause_on_battery", g_pauseOnBattery);
-    save_int(L"pause_on_maximized", g_pauseOnMaximized); save_int(L"fill", g_fill); save_int(L"mute", g_mute); save_int(L"speed_pct", g_speedPct); save_int(L"optimize", g_optimize); save_int(L"span", g_spanSetting);
+    save_int(L"pause_on_maximized", g_pauseOnMaximized); save_int(L"fill", g_fill); save_int(L"mute", g_mute); save_int(L"speed_pct", g_speedPct); save_int(L"optimize", g_optimize); save_int(L"span", g_spanSetting); save_int(L"fps_cap", g_fpsCap); save_int(L"canvas_pct", g_canvasPct);
     for (int i = 0; i < MAX_MON; i++) { wchar_t k[16]; swprintf(k, 16, L"file%d", i); WritePrivateProfileStringW(L"main", k, g_monFile[i], g_ini); }
 }
 
@@ -160,7 +163,8 @@ static mpv_handle *mpv_start(HWND wid_wnd, const wchar_t *shader) {
         {"load-console", "no"}, {"load-select", "no"}, {"load-commands", "no"}, {"load-positioning", "no"}, {"load-context-menu", "no"},
         {"sub-auto", "no"}, {"sid", "no"}, {"load-auto-profiles", "no"},
         {"vo", "gpu"}, {"gpu-api", "d3d11"}, {"hwdec", "d3d11va,auto-safe"}, {"hwdec-codecs", "all"},
-        {"hwdec-extra-frames", "1"},             // default 6 spare decoder surfaces
+        {"hwdec-extra-frames", "0"},             // A/B on target PC: -15 MB vs 1, no stutter
+        {"vd-lavc-dr", "no"},
         {"vd-lavc-threads", "1"},
         {"d3d11-flip", "yes"}, {"swapchain-depth", "1"}, {"d3d11-output-format", "rgba8"},
         {"profile", "fast"}, {"fbo-format", "rgba8"}, {"interpolation", "no"}, {"deband", "no"},
@@ -177,6 +181,7 @@ static mpv_handle *mpv_start(HWND wid_wnd, const wchar_t *shader) {
         char sp8[MAX_PATH * 6]; to_utf8(shader, sp8, sizeof sp8);
         setopt(m, "glsl-shaders", sp8); setopt(m, "keepaspect", "no"); setopt(m, "panscan", "0.0");
     } else setopt(m, "panscan", g_fill ? "1.0" : "0.0");
+    if (g_fpsCap > 0) { char b[16]; snprintf(b, sizeof b, "%d", g_fpsCap); setopt(m, "override-display-fps", b); }
     setopt(m, "gpu-shader-cache", "no"); setopt(m, "icc-profile-auto", "no");
     if (g_mpvOpts[0]) {   // user overrides last, so they win
         char buf[2048]; strcpy(buf, g_mpvOpts);
@@ -269,7 +274,12 @@ static const wchar_t *write_tile_shader(int grp, const RECT *box, wchar_t *path)
     swprintf(path, MAX_PATH, L"%s\\tile%d.glsl", g_appdir, grp);
     FILE *f = _wfopen(path, L"w"); if (!f) return NULL;
     int W = box->right - box->left, H = box->bottom - box->top;
-    fprintf(f, "//!HOOK MAIN\n//!BIND HOOKED\n//!WIDTH %d\n//!HEIGHT %d\n//!DESC LiteWall per-monitor layout\n\n", W, H);
+    // The canvas is rendered at g_canvasPct of the window size and stretched to the window by mpv's
+    // final output pass, so the big intermediate texture shrinks by pct^2 (75% -> 56% of the pixels).
+    int pct = g_canvasPct < 25 ? 25 : g_canvasPct > 100 ? 100 : g_canvasPct;
+    int CW = (W * pct / 100) & ~1, CH = (H * pct / 100) & ~1;
+    LOG("tile canvas %dx%d (window %dx%d, %d%%)", CW, CH, W, H, pct);
+    fprintf(f, "//!HOOK MAIN\n//!BIND HOOKED\n//!WIDTH %d\n//!HEIGHT %d\n//!DESC LiteWall per-monitor layout\n\n", CW, CH);
     fprintf(f, "vec4 lw_tile(vec2 px, vec4 r, float va) {\n"
                "    vec2 l = (px - r.xy) / r.zw; float ma = r.z / r.w; vec2 uv = l;\n");
     if (g_fill) fprintf(f, "    if (ma > va) uv.y = 0.5 + (l.y - 0.5) * (va / ma); else uv.x = 0.5 + (l.x - 0.5) * (ma / va);\n");
@@ -570,7 +580,7 @@ static LRESULT CALLBACK msg_proc_wrap(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_OPT_DONE) { LOG("optimized copy ready -> reloading players"); create_screens(); apply_pause(); return 0; }
     if (msg == WM_TIMER && wp == 5) { g_statTicks++; log_stats(); if (g_statTicks == 3 || g_statTicks == 15) for (int g = 0; g < g_ngrp; g++) if (g_grp[g].mpv) log_player_props(g_grp[g].mpv, g); if (g_statTicks >= g_statSecs) {
         KillTimer(h, 5);
-        LOG("SUMMARY avg_private=%.1fMB avg_cpu_1s=%.1f%%core samples=%d (t>=10s) mode=%d opts=%s", g_nSum ? g_sumPriv / g_nSum : 0, g_nSum ? g_sumCpu / g_nSum : 0, g_nSum, g_mode, g_mpvOpts[0] ? g_mpvOpts : "(defaults)");
+        LOG("SUMMARY avg_private=%.1fMB avg_cpu_1s=%.1f%%core samples=%d (t>=10s) mode=%d canvas=%d%% fps_cap=%d opts=%s", g_nSum ? g_sumPriv / g_nSum : 0, g_nSum ? g_sumCpu / g_nSum : 0, g_nSum, g_mode, g_canvasPct, g_fpsCap, g_mpvOpts[0] ? g_mpvOpts : "(defaults)");
         LOG("stat sampling done");
         if (g_exitAfterStats) DestroyWindow(g_msg);
     } return 0; }
@@ -591,18 +601,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
         const wchar_t *cl = GetCommandLineW();
         g_log = wcsstr(cl, L"--log") != NULL; g_noVideo = wcsstr(cl, L"--no-video") != NULL;
         g_exitAfterStats = wcsstr(cl, L"--exit-after-stats") != NULL;
+        g_cliCanvas = g_cliFps = -1;
         int argc; LPWSTR *argv = CommandLineToArgvW(cl, &argc);
         for (int i = 1; argv && i < argc; i++) {
             if (!wcscmp(argv[i], L"--mpv-opts") && i + 1 < argc) WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, g_mpvOpts, sizeof g_mpvOpts, NULL, NULL);
+            else if (!wcscmp(argv[i], L"--canvas-scale") && i + 1 < argc) g_cliCanvas = _wtoi(argv[++i]);
+            else if (!wcscmp(argv[i], L"--fps-cap") && i + 1 < argc) g_cliFps = _wtoi(argv[++i]);
             else if (!wcscmp(argv[i], L"--stat-secs") && i + 1 < argc) { g_statSecs = _wtoi(argv[++i]); if (g_statSecs < 12) g_statSecs = 12; }
         }
         LocalFree(argv);
+        if (g_cliCanvas >= 0) g_canvasPct = g_cliCanvas;   // command-line overrides (not saved... unless settings change)
+        if (g_cliFps >= 0) g_fpsCap = g_cliFps;
         if (g_log) {
             wchar_t lp[MAX_PATH]; swprintf(lp, MAX_PATH, L"%s\\litewall.log", g_appdir);
             g_logf = _wfopen(lp, L"w");
             OSVERSIONINFOW ov = {sizeof ov};
             typedef LONG(WINAPI * RtlGV)(OSVERSIONINFOW *); RtlGV rg = (RtlGV)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"); if (rg) rg(&ov);
-            LOG("LiteWall 0.3.2  cmdline=%ls", cl);
+            LOG("LiteWall 0.3.3  cmdline=%ls", cl);
             LOG("Windows %lu.%lu build %lu; settings file=%ls fill=%d mute=%d speed=%d", ov.dwMajorVersion, ov.dwMinorVersion, ov.dwBuildNumber, g_file, g_fill, g_mute, g_speedPct);
             DISPLAY_DEVICEW dd = {sizeof dd}; for (DWORD i = 0; EnumDisplayDevicesW(NULL, i, &dd, 0); i++) { if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) LOG("display %ls: %ls", dd.DeviceName, dd.DeviceString); dd.cb = sizeof dd; }
         }

@@ -18,7 +18,7 @@ static void opt_dir(wchar_t *out) { swprintf(out, MAX_PATH, L"%s\\library\\.opti
 static const wchar_t *base_name(const wchar_t *p) { const wchar_t *b = wcsrchr(p, L'\\'); return b ? b + 1 : p; }
 static void opt_path(const wchar_t *orig, int tw, int th, wchar_t *out, const wchar_t *suffix) {
     wchar_t d[MAX_PATH]; opt_dir(d);
-    swprintf(out, MAX_PATH * 2, L"%s\\%s.%dx%d.mp4%s", d, base_name(orig), tw, th, suffix);
+    swprintf(out, MAX_PATH * 2, L"%s\\%s.%dx%d@%d.mp4%s", d, base_name(orig), tw, th, g_fpsCap, suffix);
 }
 static int file_ok(const wchar_t *p) {
     WIN32_FILE_ATTRIBUTE_DATA fa; return GetFileAttributesExW(p, GetFileExInfoStandard, &fa) && (fa.nFileSizeLow || fa.nFileSizeHigh);
@@ -36,7 +36,7 @@ static void opt_delete_for(const wchar_t *orig) {   // remove all optimized copi
     FindClose(h);
 }
 
-typedef struct { int64_t w, h; double dur; } Probe;
+typedef struct { int64_t w, h; double dur, fps; } Probe;
 static int opt_probe(const wchar_t *file, Probe *p) {
     memset(p, 0, sizeof *p);
     mpv_handle *m = mpv_create(); if (!m) return 0;
@@ -50,7 +50,7 @@ static int opt_probe(const wchar_t *file, Probe *p) {
         DWORD t0 = GetTickCount();
         for (;;) {
             mpv_event *e = mpv_wait_event(m, 1.0);
-            if (e->event_id == MPV_EVENT_FILE_LOADED) mpv_get_property(m, "duration", MPV_FORMAT_DOUBLE, &p->dur);
+            if (e->event_id == MPV_EVENT_FILE_LOADED) { mpv_get_property(m, "duration", MPV_FORMAT_DOUBLE, &p->dur); mpv_get_property(m, "container-fps", MPV_FORMAT_DOUBLE, &p->fps); }
             if (e->event_id == MPV_EVENT_VIDEO_RECONFIG) {
                 mpv_get_property(m, "width", MPV_FORMAT_INT64, &p->w); mpv_get_property(m, "height", MPV_FORMAT_INT64, &p->h);
                 if (p->w > 0) { ok = 1; break; }
@@ -63,11 +63,11 @@ static int opt_probe(const wchar_t *file, Probe *p) {
 }
 
 // Encode with one encoder; returns 1 on success.
-static int opt_encode(const wchar_t *src, const wchar_t *dst, int ow, int oh, const char *enc, const char *encopts) {
+static int opt_encode(const wchar_t *src, const wchar_t *dst, int ow, int oh, int fps, const char *enc, const char *encopts) {
     mpv_handle *m = mpv_create(); if (!m) return 0;
     char u[MAX_PATH * 6], o8[MAX_PATH * 6], vf[96];
     to_utf8(src, u, sizeof u); to_utf8(dst, o8, sizeof o8);
-    snprintf(vf, sizeof vf, "scale=w=%d:h=%d", ow, oh);
+    if (fps > 0) snprintf(vf, sizeof vf, "scale=w=%d:h=%d,fps=%d", ow, oh, fps); else snprintf(vf, sizeof vf, "scale=w=%d:h=%d", ow, oh);
     static const char *o[][2] = {{"config", "no"}, {"terminal", "no"}, {"msg-level", "all=no"}, {"load-scripts", "no"}, {"ytdl", "no"},
         {"idle", "no"}, {"keep-open", "no"}, {"loop-file", "no"}, {"sid", "no"}, {"hwdec", "auto-copy"},
         {"of", "mp4"}, {"ofopts", "movflags=+faststart"}, {"oac", "aac"}, {"oacopts", "b=128k"}};
@@ -106,7 +106,7 @@ static int opt_needed(const wchar_t *f, int tw, int th, Probe *p, int *ow, int *
     WIN32_FILE_ATTRIBUTE_DATA fa; GetFileAttributesExW(f, GetFileExInfoStandard, &fa);
     double bytes = (double)fa.nFileSizeHigh * 4294967296.0 + fa.nFileSizeLow;
     double mbps = p->dur > 0 ? bytes * 8 / p->dur / 1e6 : 0;
-    int big = p->w > tw || p->h > th, heavy = mbps > 25;
+    int big = p->w > tw || p->h > th, heavy = mbps > 25 || (g_fpsCap > 0 && p->fps > g_fpsCap + 1);
     // cover the target box keeping aspect (fill crops at playback); never upscale; even dimensions
     double k = (double)tw / p->w; if ((double)th / p->h > k) k = (double)th / p->h; if (k > 1) k = 1;
     *ow = ((int)(p->w * k + 0.5)) & ~1; *oh = ((int)(p->h * k + 0.5)) & ~1;
@@ -156,7 +156,7 @@ static DWORD WINAPI opt_thread(LPVOID arg) {
             for (size_t i = 0; i < sizeof encs / sizeof encs[0] && !ok && g_optimize; i++) {
                 DeleteFileW(part);
                 LOG("optimize %ls -> %dx%d with %s", base_name(todo), ow, oh, encs[i][0]);
-                ok = opt_encode(todo, part, ow, oh, encs[i][0], encs[i][1]);
+                ok = opt_encode(todo, part, ow, oh, (g_fpsCap > 0 && p.fps > g_fpsCap + 1) ? g_fpsCap : 0, encs[i][0], encs[i][1]);
             }
             if (ok) {
                 // drop copies made for other (old) monitor sizes, then publish the new one

@@ -12,7 +12,7 @@
 #define PW 300
 #define PH 169
 enum { IDC_LIST = 1000, IDC_SEARCH, IDC_ADD, IDC_PREVIEW, IDC_NAME, IDC_RES, IDC_MON, IDC_APPLY, IDC_REMOVE,
-       IDC_FILL, IDC_PMAX, IDC_PBAT, IDC_START, IDC_MUTE, IDC_SPEED, IDC_HDR1, IDC_HDR2, IDC_SPEEDLBL, IDC_MONLBL, IDC_OPT, IDC_SPAN };
+       IDC_FILL, IDC_PMAX, IDC_PBAT, IDC_START, IDC_MUTE, IDC_SPEED, IDC_HDR1, IDC_HDR2, IDC_SPEEDLBL, IDC_MONLBL, IDC_OPT, IDC_SPAN, IDC_FPS, IDC_FPSLBL, IDC_CANVAS, IDC_CANVASLBL };
 
 typedef struct { wchar_t path[MAX_PATH * 2]; wchar_t name[MAX_PATH]; int w, h, img, ready; } Item;
 
@@ -222,6 +222,8 @@ static void fill_monitors(void) {
 static void sync_settings_ui(void) {
     CheckDlgButton(g_ui, IDC_FILL, g_fill); CheckDlgButton(g_ui, IDC_PMAX, g_pauseOnMaximized);
     CheckDlgButton(g_ui, IDC_PBAT, g_pauseOnBattery); CheckDlgButton(g_ui, IDC_START, startup_enabled()); CheckDlgButton(g_ui, IDC_MUTE, g_mute);
+    SendDlgItemMessageW(g_ui, IDC_FPS, CB_SETCURSEL, g_fpsCap == 30 ? 0 : g_fpsCap == 60 ? 1 : 2, 0);
+    SendDlgItemMessageW(g_ui, IDC_CANVAS, CB_SETCURSEL, g_canvasPct >= 100 ? 0 : g_canvasPct >= 75 ? 1 : 2, 0);
     CheckDlgButton(g_ui, IDC_OPT, g_optimize); CheckDlgButton(g_ui, IDC_SPAN, g_spanSetting);
     static const int sp[] = {25, 50, 75, 100, 125, 150, 200}; HWND c = GetDlgItem(g_ui, IDC_SPEED);
     for (int i = 0; i < 7; i++) if (sp[i] == g_speedPct) SendMessageW(c, CB_SETCURSEL, i, 0);
@@ -233,7 +235,7 @@ static HWND mk(const wchar_t *cls, const wchar_t *txt, DWORD st, int id) {
 }
 static void layout(void) {
     RECT r; GetClientRect(g_ui, &r); int W = r.right, H = r.bottom, P = 340, m = 16;
-    HDWP d = BeginDeferWindowPos(28);
+    HDWP d = BeginDeferWindowPos(34);
 #define MV(id, x, y, w, h) d = DeferWindowPos(d, GetDlgItem(g_ui, id), NULL, x, y, w, h, SWP_NOZORDER)
     MV(IDC_SEARCH, m, m, 280, 28); MV(IDC_ADD, m + 292, m, 150, 28);
     MV(IDC_LIST, m, m + 44, W - P - 2 * m, H - m - 44 - m);
@@ -246,7 +248,9 @@ static void layout(void) {
     MV(IDC_FILL, x, y, pw, 22); y += 26; MV(IDC_PMAX, x, y, pw, 22); y += 26; MV(IDC_PBAT, x, y, pw, 22); y += 26;
     MV(IDC_START, x, y, pw, 22); y += 26; MV(IDC_MUTE, x, y, pw, 22); y += 26;
     MV(IDC_OPT, x, y, pw, 22); y += 26; MV(IDC_SPAN, x, y, pw, 22); y += 32;
-    MV(IDC_SPEEDLBL, x, y + 4, 110, 20); MV(IDC_SPEED, x + 115, y, 100, 200);
+    MV(IDC_SPEEDLBL, x, y + 4, 110, 20); MV(IDC_SPEED, x + 115, y, 100, 200); y += 32;
+    MV(IDC_FPSLBL, x, y + 4, 110, 20); MV(IDC_FPS, x + 115, y, 100, 200); y += 32;
+    MV(IDC_CANVASLBL, x, y + 4, 110, 20); MV(IDC_CANVAS, x + 115, y, 170, 200);
 #undef MV
     EndDeferWindowPos(d);
 }
@@ -300,6 +304,12 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             {IDC_PBAT, L"Pause on battery"}, {IDC_START, L"Start with Windows"}, {IDC_MUTE, L"Mute audio"},
             {IDC_OPT, L"Optimize videos for my monitors (less RAM)"}, {IDC_SPAN, L"Span one wallpaper across monitors"}};
         for (int i = 0; i < 7; i++) SetWindowTheme(mk(L"BUTTON", cb[i].t, BS_AUTOCHECKBOX | WS_TABSTOP, cb[i].id), L"", L""); // unthemed so dark colors apply
+        mk(L"STATIC", L"Frame rate", 0, IDC_FPSLBL);
+        { HWND c = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, IDC_FPS); SetWindowTheme(c, L"DarkMode_CFD", NULL);
+          SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"30 fps"); SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"60 fps"); SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Source"); }
+        mk(L"STATIC", L"Multi-monitor quality", 0, IDC_CANVASLBL);
+        { HWND c = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, IDC_CANVAS); SetWindowTheme(c, L"DarkMode_CFD", NULL);
+          SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Full (100%)"); SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Balanced (75%)"); SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Light (50%)"); }
         mk(L"STATIC", L"Playback speed", 0, IDC_SPEEDLBL);
         HWND sp = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, IDC_SPEED); SetWindowTheme(sp, L"DarkMode_CFD", NULL);
         const wchar_t *spt[] = {L"0.25\u00d7", L"0.5\u00d7", L"0.75\u00d7", L"1\u00d7", L"1.25\u00d7", L"1.5\u00d7", L"2\u00d7"};
@@ -325,7 +335,7 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         lastRow = row;
     } return 0;
     case WM_SIZE: layout(); return 0;
-    case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x = 860; ((MINMAXINFO *)lp)->ptMinTrackSize.y = 600; return 0;
+    case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x = 860; ((MINMAXINFO *)lp)->ptMinTrackSize.y = 780; return 0;
     case WM_ERASEBKGND: {
         RECT r; GetClientRect(h, &r); FillRect((HDC)wp, &r, g_brBg);
         RECT p = r; p.left = r.right - 340 - 8; FillRect((HDC)wp, &p, g_brPanel); return 1;
@@ -419,6 +429,12 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (id == IDC_MUTE) { g_mute = on; players_set_string("aid", on ? "no" : "auto"); }
             save_settings(); apply_pause();
         }
+        else if ((id == IDC_FPS || id == IDC_CANVAS) && code == CBN_SELCHANGE) {
+            int k = (int)SendDlgItemMessageW(h, id, CB_GETCURSEL, 0, 0);
+            if (id == IDC_FPS) g_fpsCap = k == 0 ? 30 : k == 1 ? 60 : 0;
+            else g_canvasPct = k == 0 ? 100 : k == 1 ? 75 : 50;
+            save_settings(); create_screens(); apply_pause();
+        }
         else if (id == IDC_SPEED && code == CBN_SELCHANGE) {
             static const int sp[] = {25, 50, 75, 100, 125, 150, 200};
             int k = (int)SendDlgItemMessageW(h, IDC_SPEED, CB_GETCURSEL, 0, 0); if (k >= 0 && k < 7) g_speedPct = sp[k];
@@ -449,6 +465,6 @@ static void ui_open(void) {
         wc.hCursor = LoadCursorW(NULL, IDC_ARROW); wc.hIcon = LoadIconW(g_inst, MAKEINTRESOURCEW(1)); RegisterClassExW(&wc); reg = 1;
     }
     HWND w = CreateWindowExW(WS_EX_ACCEPTFILES, L"LiteWallLibrary", L"LiteWall \u2014 Library", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 1180, 720, NULL, NULL, g_inst, NULL);
+                             CW_USEDEFAULT, CW_USEDEFAULT, 1180, 820, NULL, NULL, g_inst, NULL);
     ShowWindow(w, SW_SHOW); SetForegroundWindow(w);
 }

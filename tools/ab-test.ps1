@@ -6,16 +6,15 @@ param([int]$Secs = 30, [string]$Exe = ".\LiteWall.exe")
 if (-not (Test-Path $Exe)) { $Exe = Join-Path $PSScriptRoot "..\LiteWall.exe" }
 $log = "$env:APPDATA\LiteWall\litewall.log"
 $sets = [ordered]@{
-  "A_defaults"          = ""
-  "B_displaydesync"     = "video-sync=display-desync"
-  "C_extraframes0"      = "hwdec-extra-frames=0"
-  "D_dr_off"            = "vd-lavc-dr=no"
-  "E_swapint0"          = "d3d11-sync-interval=0"
-  "F_fps30"             = "override-display-fps=30"
-  "G_noflip"            = "d3d11-flip=no"
-  "H_gpunext"           = "vo=gpu-next"
-  "I_combo"             = "hwdec-extra-frames=0,vd-lavc-dr=no,override-display-fps=30"
-  "J_perMonitor"        = "--per-monitor"
+  # v0.3.3 defaults: hwdec-extra-frames=0, vd-lavc-dr=no, fps cap 30, tile canvas 75%
+  "A_defaults_c75"   = ""
+  "B_canvas100"      = "--canvas-scale 100"
+  "C_canvas60"       = "--canvas-scale 60"
+  "D_canvas50"       = "--canvas-scale 50"
+  "E_fps60"          = "--fps-cap 60"
+  "F_fpsSource"      = "--fps-cap 0"
+  "G_c50_extra"      = "--canvas-scale 50 --mpv-opts `"demuxer-max-bytes=1MiB,audio=no`""
+  "H_perMonitor"     = "--per-monitor"
 }
 $results = @()
 foreach ($k in $sets.Keys) {
@@ -29,6 +28,7 @@ foreach ($k in $sets.Keys) {
   Start-Sleep 1
   Copy-Item $log "$env:TEMP\litewall-$k.log" -Force
   $sum = Select-String $log -Pattern "SUMMARY avg_private=([\d.]+)MB avg_cpu_1s=([\d.]+)" | Select-Object -Last 1
+  $cv = Select-String $log -Pattern "tile canvas (\d+x\d+)" | Select-Object -Last 1
   $rej = (Select-String $log -Pattern "REJECTED" | % { $_.Line -replace '^.*REJECTED ', '' }) -join "; "
   $hw  = (Select-String $log -Pattern "prop hwdec-current = (\S+)" | Select-Object -Last 1)
   $results += [pscustomobject]@{
@@ -36,6 +36,7 @@ foreach ($k in $sets.Keys) {
     PrivateMB = if ($sum) { [double]$sum.Matches[0].Groups[1].Value } else { $null }
     CpuPct    = if ($sum) { [double]$sum.Matches[0].Groups[2].Value } else { $null }
     Hwdec     = if ($hw) { $hw.Matches[0].Groups[1].Value } else { "?" }
+    Canvas    = if ($cv) { $cv.Matches[0].Groups[1].Value } else { "-" }
     Rejected  = $rej
   }
 }
