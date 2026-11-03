@@ -134,7 +134,10 @@ static BOOL CALLBACK find_workerw(HWND top, LPARAM lp) {
     }
     return TRUE;
 }
-static HWND get_wallpaper_parent(void) {
+static HWND get_wallpaper_parent_ex(int force);
+static HWND get_wallpaper_parent(void) { return get_wallpaper_parent_ex(1); }
+static HWND get_wallpaper_parent_ex(int force) {
+    if (!force && g_workerw && IsWindow(g_workerw) && IsWindowVisible(g_workerw)) { LOG("reusing wallpaper host %p (no 0x052C)", (void *)g_workerw); return g_workerw; }
     HWND progman = FindWindowW(L"Progman", NULL);
     DWORD_PTR res;
     // Ask Explorer to spawn the WorkerW that sits between icons and wallpaper.
@@ -152,7 +155,7 @@ static HWND get_wallpaper_parent(void) {
    group of monitors in span mode. Memory is kept low by trimming mpv buffers and, mainly, by playing
    an optimized copy at monitor resolution instead of a 4K original (see optimizer.c). */
 #define MAX_GRP MAX_MON
-typedef struct { mpv_handle *mpv; wchar_t file[MAX_PATH * 2]; int paused; } Group;
+typedef struct { mpv_handle *mpv; wchar_t file[MAX_PATH * 2]; wchar_t loaded[MAX_PATH * 2]; int paused; int shaderGen; } Group;
 static Group g_grp[MAX_GRP];
 static int g_ngrp;
 static int g_maxW = 1920, g_maxH = 1080;          // largest playback target (monitor, or span box)
@@ -216,15 +219,26 @@ static mpv_handle *mpv_start(HWND wid_wnd, const wchar_t *shader) {
     return m;
 }
 
-static void mpv_load_group(Group *G, int tw, int th) {
-    wchar_t opt[MAX_PATH * 2]; const wchar_t *f = G->file;
-    if (g_optimize && optimized_for(G->file, tw, th, opt)) f = opt;
+static const wchar_t *any_copy_for(const wchar_t *orig, int tw, int th, wchar_t *out); // optimizer.c
+// Which file should play for G->file now: exact optimized copy, else any copy for this size made
+// at another fps cap (keeps playing light while the helper re-encodes), else the original.
+static const wchar_t *group_target(Group *G, wchar_t *opt) {
+    if (g_optimize && (optimized_for(G->file, g_maxW, g_maxH, opt) || any_copy_for(G->file, g_maxW, g_maxH, opt))) return opt;
+    return G->file;
+}
+static void mpv_load_group_at(Group *G, double startPos) {
+    wchar_t opt[MAX_PATH * 2]; const wchar_t *f = group_target(G, opt);
     LOG("load %ls%s", f, f == G->file ? "" : "  (optimized copy)");
-    char path[MAX_PATH * 6]; to_utf8(f, path, sizeof path);
-    const char *cmd[] = {"loadfile", path, NULL};
-    mpv_command_async(G->mpv, 0, cmd);
+    wcscpy(G->loaded, f);
+    char path[MAX_PATH * 6], so[64]; to_utf8(f, path, sizeof path);
+    if (startPos > 0.5) {
+        snprintf(so, sizeof so, "start=%.2f", startPos);
+        const char *cmd[] = {"loadfile", path, "replace", "-1", so, NULL};
+        mpv_command_async(G->mpv, 0, cmd);
+    } else { const char *cmd[] = {"loadfile", path, "replace", NULL}; mpv_command_async(G->mpv, 0, cmd); }
     if (G->paused == 1) mpv_set_property_string(G->mpv, "pause", "yes");
 }
+static void mpv_load_group(Group *G, int tw, int th) { (void)tw; (void)th; mpv_load_group_at(G, 0); }
 
 /* ---------- wallpaper windows ---------- */
 static LRESULT CALLBACK wall_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -289,7 +303,7 @@ static void reattach_screens(void) {
 static const wchar_t *write_tile_shader(int grp, const RECT *box, wchar_t *path) {
     int n = 0; for (int i = 0; i < g_nscr; i++) if (g_scr[i].grp == grp) n++;
     if (n < 2) return NULL;                       // single monitor: plain playback, no shader
-    swprintf(path, MAX_PATH, L"%s\\tile%d.glsl", g_appdir, grp);
+    swprintf(path, MAX_PATH, L"%s\\tile%d%c.glsl", g_appdir, grp, (g_grp[grp].shaderGen++ & 1) ? 'b' : 'a');   // alternate names: mpv caches shaders by path
     FILE *f = _wfopen(path, L"w"); if (!f) return NULL;
     int W = box->right - box->left, H = box->bottom - box->top;
     // The canvas is rendered at g_canvasPct of the window size and stretched to the window by mpv's
@@ -318,11 +332,12 @@ static const wchar_t *write_tile_shader(int grp, const RECT *box, wchar_t *path)
 }
 
 static void create_screens(void) {
+    LOG("create screens");
     destroy_screens();
     if (g_noVideo) { LOG("--no-video: not creating wallpaper"); return; }
     int any = g_file[0] != 0; for (int i = 0; i < MAX_MON; i++) any |= g_monFile[i][0] != 0;
     if (!any) return;
-    HWND parent = get_wallpaper_parent();
+    HWND parent = get_wallpaper_parent_ex(0);
     { wchar_t c[64] = L""; GetClassNameW(parent, c, 64); RECT pr; GetWindowRect(parent, &pr);
       LOG("wallpaper host hwnd=%p class=%ls rect=(%ld,%ld)-(%ld,%ld)", (void *)parent, c, pr.left, pr.top, pr.right, pr.bottom); }
     EnumDisplayMonitors(NULL, NULL, enum_mon, 0);
@@ -389,6 +404,70 @@ static void create_screens(void) {
     }
     LOG("optimize target = %dx%d (optimize %s)", g_maxW, g_maxH, g_optimize ? "on" : "off");
     opt_kick();
+}
+
+/* ---------- live (no-rebuild) updates, v0.3.6 ---------- */
+static void apply_pause(void);
+static RECT group_box(int g) { RECT r = {0}; for (int i = 0; i < g_nscr; i++) if (g_scr[i].grp == g && g_scr[i].hwnd) return g_scr[i].wr; return r; }
+static void rebuild(const char *why) { LOG("full rebuild (%s)", why); create_screens(); apply_pause(); }
+// Canvas % / Fill: rewrite the tile shader and swap it on the running player.
+static void live_layout(const char *why) {
+    if (!g_ngrp) return;
+    for (int g = 0; g < g_ngrp; g++) {
+        Group *G = &g_grp[g]; if (!G->mpv) continue;
+        wchar_t shp[MAX_PATH]; const wchar_t *sh = NULL; RECT box = group_box(g);
+        if (g_mode == MODE_TILE) sh = write_tile_shader(g, &box, shp);
+        if (sh) {
+            char p8[MAX_PATH * 6]; to_utf8(sh, p8, sizeof p8);
+            const char *cmd[] = {"change-list", "glsl-shaders", "set", p8, NULL}; mpv_command(G->mpv, cmd);
+            LOG("live update: shader (%s) group %d -> %ls", why, g, sh);
+        } else { mpv_set_property_string(G->mpv, "panscan", g_fill ? "1.0" : "0.0"); LOG("live update: panscan=%s (%s) group %d", g_fill ? "1.0" : "0.0", why, g); }
+    }
+    request_redraw();
+}
+// Swap any group whose best file changed (new optimized copy, fps cap change). Keeps position.
+static void hot_swap_changed(const char *why) {
+    for (int g = 0; g < g_ngrp; g++) {
+        Group *G = &g_grp[g]; if (!G->mpv) continue;
+        wchar_t opt[MAX_PATH * 2]; const wchar_t *f = group_target(G, opt);
+        if (!_wcsicmp(f, G->loaded)) continue;
+        double pos = 0; mpv_get_property(G->mpv, "time-pos", MPV_FORMAT_DOUBLE, &pos);
+        LOG("hot-swap loadfile (%s) group %d at %.1fs", why, g, pos);
+        mpv_load_group_at(G, pos);
+    }
+}
+static void live_fps(void) {
+    char b[16]; snprintf(b, sizeof b, "%d", g_fpsCap > 0 ? g_fpsCap : 0);
+    players_set_string("override-display-fps", b);
+    LOG("live update: override-display-fps=%s", b);
+    hot_swap_changed("fps cap");
+    opt_kick();
+}
+// Wallpaper assignment changed: reuse players when the monitor grouping is the same.
+static void screens_update(const char *why) {
+    if (g_nscr && !g_noVideo) {
+        int newg[MAX_MON], ng = 0; const wchar_t *gf[MAX_GRP];
+        int permon = g_mode == MODE_PERMON, mode = g_spanSetting ? MODE_SPAN : MODE_TILE;
+        if (wcsstr(GetCommandLineW(), L"--span")) mode = MODE_SPAN; else if (wcsstr(GetCommandLineW(), L"--per-monitor")) mode = MODE_PERMON;
+        int same = mode == g_mode;
+        for (int i = 0; i < g_nscr && same; i++) {
+            const wchar_t *f = screen_file(i); newg[i] = -1;
+            if (!f[0]) continue;
+            int g = -1;
+            if (!permon) for (int k = 0; k < ng; k++) if (!_wcsicmp(gf[k], f)) { g = k; break; }
+            if (g < 0 && ng < MAX_GRP) { g = ng; gf[ng++] = f; }
+            newg[i] = g;
+        }
+        if (same && ng == g_ngrp) for (int i = 0; i < g_nscr; i++) if (newg[i] != g_scr[i].grp) same = 0;
+        for (int g = 0; same && g < ng; g++) if (!g_grp[g].mpv) same = 0;
+        if (same) {
+            for (int g = 0; g < ng; g++) if (_wcsicmp(g_grp[g].file, gf[g])) {
+                wcscpy(g_grp[g].file, gf[g]); LOG("hot-swap loadfile (%s) group %d -> %ls", why, g, gf[g]); mpv_load_group_at(&g_grp[g], 0);
+            }
+            opt_kick(); apply_pause(); return;
+        }
+    }
+    rebuild(why);
 }
 
 /* ---------- diagnostics: memory/CPU sampler ---------- */
@@ -640,7 +719,7 @@ static void rot_switch_to(const wchar_t *f, const char *why) {
     for (int g = 0; g < g_ngrp; g++) if (g_grp[g].mpv && (!old[0] || !_wcsicmp(g_grp[g].file, old))) {
         wcscpy(g_grp[g].file, f); mpv_load_group(&g_grp[g], g_maxW, g_maxH); done = 1;   // reuse player
     }
-    if (!done) { create_screens(); apply_pause(); }
+    if (!done) screens_update("rotation");
     else opt_kick();   // a not-yet-optimized item plays its original now; WM_OPT_DONE reloads it later
 }
 static void rot_next(const char *why) {
@@ -696,8 +775,27 @@ static void rot_startup(void) {
     g_rotRemainMs = (DWORD)rot_interval_secs() * 1000u;
 }
 
+/* ---------- --test-settings (v0.3.6): cycle live settings every 5 s ---------- */
+static void test_step(void) {
+    static int step;
+    switch (step++) {
+    case 0: g_canvasPct = 50; LOG("TEST step: canvas 50"); live_layout("canvas"); break;
+    case 1: g_canvasPct = 100; LOG("TEST step: canvas 100"); live_layout("canvas"); break;
+    case 2: g_canvasPct = 75; LOG("TEST step: canvas 75"); live_layout("canvas"); break;
+    case 3: g_fpsCap = 60; LOG("TEST step: fps 60"); live_fps(); break;
+    case 4: g_fpsCap = 30; LOG("TEST step: fps 30"); live_fps(); break;
+    case 5: g_fill = !g_fill; LOG("TEST step: fill %d", g_fill); live_layout("fill"); break;
+    case 6: g_fill = !g_fill; LOG("TEST step: fill %d", g_fill); live_layout("fill"); break;
+    case 7: case 8: { wchar_t f[MAX_PATH * 2]; LOG("TEST step: apply next library item");
+        if (rot_pick(f, ROT_ORDER)) { wcscpy(g_file, f); memset(g_monFile, 0, sizeof g_monFile); screens_update("apply (test)"); } break; }
+    default: KillTimer(g_msg, 11); LOG("TEST done"); save_settings(); return;
+    }
+    save_settings();
+    if (g_ui) sync_settings_ui();
+}
+
 static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == g_taskbarCreated && msg) { tray_add(); create_screens(); return 0; } // Explorer restarted
+    if (msg == g_taskbarCreated && msg) { tray_add(); g_workerw = NULL; rebuild("Explorer restarted"); return 0; } // Explorer restarted
     switch (msg) {
     case WM_TRAY:
         if (LOWORD(lp) == WM_RBUTTONUP) show_menu(h); else if (LOWORD(lp) == WM_LBUTTONUP) ui_open();
@@ -705,10 +803,10 @@ static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case IDM_LIBRARY: ui_open(); return 0;
-        case IDM_CHOOSE: if (choose_file(h)) { memset(g_monFile, 0, sizeof g_monFile); save_settings(); create_screens(); } break;
+        case IDM_CHOOSE: if (choose_file(h)) { memset(g_monFile, 0, sizeof g_monFile); save_settings(); screens_update("choose file"); } break;
         case IDM_PAUSE: g_userPaused = !g_userPaused; save_settings(); break;
         case IDM_FIT: g_fill = !g_fill; save_settings();
-            players_set_string("panscan", g_fill ? "1.0" : "0.0"); if (g_mode == MODE_TILE) create_screens();
+            live_layout("fill");
             break;
         case IDM_MAXIMIZED: g_pauseOnMaximized = !g_pauseOnMaximized; save_settings(); break;
         case IDM_BATTERY: g_pauseOnBattery = !g_pauseOnBattery; save_settings(); break;
@@ -760,7 +858,8 @@ static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 static LRESULT CALLBACK msg_proc_wrap(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == g_showMsg && msg) { ui_open(); return 0; }
-    if (msg == WM_OPT_DONE) { LOG("optimized copy ready -> reloading players"); create_screens(); apply_pause(); return 0; }
+    if (msg == WM_OPT_DONE) { LOG("optimized copy ready"); hot_swap_changed("optimized copy ready"); return 0; }
+    if (msg == WM_TIMER && wp == 11) { test_step(); return 0; }
     if (msg == WM_TIMER && wp == 5) { g_statTicks++; log_stats(); if (g_statTicks == 3 || g_statTicks == 15) for (int g = 0; g < g_ngrp; g++) if (g_grp[g].mpv) log_player_props(g_grp[g].mpv, g); if (g_statTicks >= g_statSecs) {
         KillTimer(h, 5);
         LOG("SUMMARY avg_private=%.1fMB avg_cpu_1s=%.1f%%core samples=%d (t>=10s) mode=%d canvas=%d%% fps_cap=%d opts=%s", g_nSum ? g_sumPriv / g_nSum : 0, g_nSum ? g_sumCpu / g_nSum : 0, g_nSum, g_mode, g_canvasPct, g_fpsCap, g_mpvOpts[0] ? g_mpvOpts : "(defaults)");
@@ -768,7 +867,7 @@ static LRESULT CALLBACK msg_proc_wrap(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_exitAfterStats) DestroyWindow(g_msg);
     } return 0; }
     if (msg == WM_TIMER && (wp == 3 || wp == 4)) { KillTimer(h, wp); reattach_screens(); apply_pause(); return 0; }
-    if (msg == WM_TIMER && wp == 2) { KillTimer(h, 2); create_screens(); apply_pause(); return 0; }
+    if (msg == WM_TIMER && wp == 2) { KillTimer(h, 2); g_workerw = NULL; rebuild("display change"); return 0; }
     return msg_proc(h, msg, wp, lp);
 }
 
@@ -823,7 +922,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
             g_logf = _wfopen(lp, L"w");
             OSVERSIONINFOW ov = {sizeof ov};
             typedef LONG(WINAPI * RtlGV)(OSVERSIONINFOW *); RtlGV rg = (RtlGV)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"); if (rg) rg(&ov);
-            LOG("LiteWall 0.3.5  cmdline=%ls", cl);
+            LOG("LiteWall 0.3.6  cmdline=%ls", cl);
             LOG("Windows %lu.%lu build %lu; settings file=%ls fill=%d mute=%d speed=%d", ov.dwMajorVersion, ov.dwMinorVersion, ov.dwBuildNumber, g_file, g_fill, g_mute, g_speedPct);
             DISPLAY_DEVICEW dd = {sizeof dd}; for (DWORD i = 0; EnumDisplayDevicesW(NULL, i, &dd, 0); i++) { if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) LOG("display %ls: %ls", dd.DeviceName, dd.DeviceString); dd.cb = sizeof dd; }
         }
@@ -851,7 +950,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     if (!wcsstr(GetCommandLineW(), L"--tray")) ui_open();   // autostart passes --tray
     apply_pause();
     SetTimer(g_msg, ID_TIMER, 1000, NULL);
-    if (g_log) { log_stats(); SetTimer(g_msg, 5, 1000, NULL); }  // 1 Hz check - negligible cost
+    if (g_log) { log_stats(); SetTimer(g_msg, 5, 1000, NULL); }
+    if (wcsstr(GetCommandLineW(), L"--test-settings")) { LOG("TEST: --test-settings, a step every 5 s"); SetTimer(g_msg, 11, 5000, NULL); }  // 1 Hz check - negligible cost
 
     // Watch the registry value Explorer updates on every virtual-desktop switch (zero idle cost).
     HKEY vdk = NULL; HANDLE vdev = CreateEventW(NULL, FALSE, FALSE, NULL);

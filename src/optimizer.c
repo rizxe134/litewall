@@ -30,6 +30,17 @@ static const wchar_t *optimized_for(const wchar_t *orig, int tw, int th, wchar_t
     opt_path(orig, tw, th, out, L"");
     return file_ok(out) ? out : NULL;
 }
+// Any existing copy for this size at another fps cap (newest), used while the exact one is encoding.
+static const wchar_t *any_copy_for(const wchar_t *orig, int tw, int th, wchar_t *out) {
+    if (!is_video_ext(orig) || tw <= 0 || th <= 0) return NULL;
+    wchar_t d[MAX_PATH], pat[MAX_PATH * 2]; opt_dir(d); swprintf(pat, MAX_PATH * 2, L"%s\\%s.%dx%d@*.mp4", d, base_name(orig), tw, th);
+    WIN32_FIND_DATAW f; HANDLE h = FindFirstFileW(pat, &f); if (h == INVALID_HANDLE_VALUE) return NULL;
+    FILETIME bt = {0}; int found = 0;
+    do { if (wcsstr(f.cFileName, L".part.") || !(f.nFileSizeLow || f.nFileSizeHigh)) continue;
+         if (CompareFileTime(&f.ftLastWriteTime, &bt) > 0) { bt = f.ftLastWriteTime; swprintf(out, MAX_PATH * 2, L"%s\\%s", d, f.cFileName); found = 1; } } while (FindNextFileW(h, &f));
+    FindClose(h);
+    return found ? out : NULL;
+}
 static void opt_delete_for(const wchar_t *orig) {   // remove all optimized copies of a library file
     wchar_t d[MAX_PATH], pat[MAX_PATH * 2]; opt_dir(d); swprintf(pat, MAX_PATH * 2, L"%s\\%s.*", d, base_name(orig));
     WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW(pat, &fd);

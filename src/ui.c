@@ -265,7 +265,7 @@ static void apply_selected(void) {
     int mon = (int)SendDlgItemMessageW(g_ui, IDC_MON, CB_GETCURSEL, 0, 0);
     if (mon <= 0) { wcscpy(g_file, g_items[i].path); memset(g_monFile, 0, sizeof g_monFile); }
     else { wcscpy(g_monFile[mon - 1], g_items[i].path); if (!g_file[0]) { /* other monitors stay empty */ } }
-    save_settings(); create_screens(); apply_pause();
+    save_settings(); screens_update("apply wallpaper");
 }
 static void add_files_dialog(void) {
     wchar_t *buf = calloc(32768, sizeof(wchar_t));
@@ -281,6 +281,14 @@ static void add_files_dialog(void) {
     free(buf);
 }
 
+static void ui_apply_combos(void) {
+    int k = (int)SendDlgItemMessageW(g_ui, IDC_FPS, CB_GETCURSEL, 0, 0), fps = k == 0 ? 30 : k == 1 ? 60 : 0;
+    k = (int)SendDlgItemMessageW(g_ui, IDC_CANVAS, CB_GETCURSEL, 0, 0); int cv = k == 0 ? 100 : k == 1 ? 75 : 50;
+    int cvChanged = cv != g_canvasPct, fpsChanged = fps != g_fpsCap;
+    g_canvasPct = cv; g_fpsCap = fps; if (cvChanged || fpsChanged) save_settings();
+    if (cvChanged) live_layout("canvas");   // playback-only: never re-encodes
+    if (fpsChanged) live_fps();
+}
 static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
@@ -334,7 +342,8 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         SetTimer(h, 7, 700, NULL);
         return 0;
     }
-    case WM_TIMER: if (wp == 7) {   // optimization progress under the thumbnail
+    case WM_TIMER: if (wp == 9) { KillTimer(h, 9); ui_apply_combos(); return 0; }
+    if (wp == 7) {   // optimization progress under the thumbnail
         static int lastRow = -1; int row = -1; wchar_t t[MAX_PATH + 32];
         for (int r = 0, n = ListView_GetItemCount(g_list); r < n; r++) {
             LVITEMW li = {LVIF_PARAM, r}; ListView_GetItem(g_list, &li);
@@ -425,7 +434,7 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             int inuse = !_wcsicmp(g_file, g_items[i].path);
             for (int k = 0; k < MAX_MON; k++) if (!_wcsicmp(g_monFile[k], g_items[i].path)) { g_monFile[k][0] = 0; inuse = 1; }
             if (!_wcsicmp(g_file, g_items[i].path)) g_file[0] = 0;
-            if (inuse) { save_settings(); create_screens(); apply_pause(); }
+            if (inuse) { save_settings(); screens_update("removed wallpaper in use"); }
             wchar_t png[MAX_PATH], meta[MAX_PATH]; thumb_paths(g_items[i].path, png, meta);
             DeleteFileW(png); DeleteFileW(meta); opt_delete_for(g_items[i].path); DeleteFileW(g_items[i].path);
             reload_library();
@@ -433,23 +442,18 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         else if (code == BN_CLICKED && (id == IDC_OPT || id == IDC_SPAN)) {
             int on = IsDlgButtonChecked(h, id) == BST_CHECKED;
             if (id == IDC_OPT) g_optimize = on; else g_spanSetting = on;
-            save_settings(); create_screens(); apply_pause(); fill_monitors();
+            save_settings(); if (id == IDC_SPAN) rebuild("span toggle"); else hot_swap_changed("optimize toggle"); fill_monitors();
         }
         else if (code == BN_CLICKED && id >= IDC_FILL && id <= IDC_MUTE) {
             int on = IsDlgButtonChecked(h, id) == BST_CHECKED;
-            if (id == IDC_FILL) { g_fill = on; players_set_string("panscan", on ? "1.0" : "0.0"); if (g_mode == MODE_TILE) create_screens(); }
+            if (id == IDC_FILL) { g_fill = on; live_layout("fill"); }
             if (id == IDC_PMAX) g_pauseOnMaximized = on;
             if (id == IDC_PBAT) g_pauseOnBattery = on;
             if (id == IDC_START) set_startup(on);
             if (id == IDC_MUTE) { g_mute = on; players_set_string("aid", on ? "no" : "auto"); }
             save_settings(); apply_pause();
         }
-        else if ((id == IDC_FPS || id == IDC_CANVAS) && code == CBN_SELCHANGE) {
-            int k = (int)SendDlgItemMessageW(h, id, CB_GETCURSEL, 0, 0);
-            if (id == IDC_FPS) g_fpsCap = k == 0 ? 30 : k == 1 ? 60 : 0;
-            else g_canvasPct = k == 0 ? 100 : k == 1 ? 75 : 50;
-            save_settings(); create_screens(); apply_pause();
-        }
+        else if ((id == IDC_FPS || id == IDC_CANVAS) && code == CBN_SELCHANGE) SetTimer(h, 9, 400, NULL);   // debounce: apply only the final value
         else if ((id == IDC_ROT || id == IDC_EVERY) && code == CBN_SELCHANGE) {
             int k = (int)SendDlgItemMessageW(h, id, CB_GETCURSEL, 0, 0); if (k < 0) return 0;
             if (id == IDC_ROT) g_rotMode = k; else g_rotEvery = k;
@@ -469,6 +473,7 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_CLOSE: DestroyWindow(h); return 0;   // hide to tray = destroy UI entirely
     case WM_DESTROY:
+        if (KillTimer(h, 9)) ui_apply_combos();
         g_uiGen++;
         if (g_il) { ImageList_Destroy(g_il); g_il = NULL; }
         if (g_prevBmp) { DeleteObject(g_prevBmp); g_prevBmp = NULL; }

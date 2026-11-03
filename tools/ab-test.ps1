@@ -6,7 +6,7 @@ param([int]$Secs = 30, [string]$Exe = ".\LiteWall.exe")
 if (-not (Test-Path $Exe)) { $Exe = Join-Path $PSScriptRoot "..\LiteWall.exe" }
 $log = "$env:APPDATA\LiteWall\litewall.log"
 $sets = [ordered]@{
-  # v0.3.5 defaults: hwdec-extra-frames=0, vd-lavc-dr=no, fps cap 30, tile canvas 75%
+  # v0.3.6 defaults: hwdec-extra-frames=0, vd-lavc-dr=no, fps cap 30, tile canvas 75%
   "A_defaults_c75"   = ""
   "B_canvas100"      = "--canvas-scale 100"
   "C_canvas60"       = "--canvas-scale 60"

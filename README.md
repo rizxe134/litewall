@@ -15,6 +15,9 @@ This is a dark, native Win32 window, modeled on Wallpaper Engine. It opens when 
 * Settings: Fill/fit, pause when maximized, pause on battery, start with Windows, mute, and playback speed.
 * Closing the window *destroys* it and frees all thumbnails and other UI resources, then trims memory. LiteWall stays in the tray. Starting with Windows launches it straight to the tray.
 
+## Live settings (v0.3.6)
+Frame rate, Multi-monitor quality, Fill screen and applying a wallpaper take effect on the running player without restarting it, so there's no flash. Only a span toggle, a display change or a per-monitor layout change rebuilds the wallpaper windows.
+
 ## Rotation and shuffle (v0.3.5)
 LiteWall can change the wallpaper by itself. Set it under **Rotation** and **Change every** in the library window's settings, or from the tray icon's **Rotation** menu.
 * Modes: **Off** (the default), **In order** (library order), **Shuffle** (plays everything once before repeating, and never the same one twice in a row), and **Random** (never the same one twice in a row).
@@ -25,7 +28,7 @@ LiteWall can change the wallpaper by itself. Set it under **Rotation** and **Cha
 
 ## Install
 
-1. Download `LiteWall-v0.3.5-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
+1. Download `LiteWall-v0.3.6-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
 2. Run `LiteWall.exe`, drag a video, GIF, or image into the library, and click **Apply**. That's the whole setup.
 3. Right-click the tray icon to change the wallpaper, pause, change auto-pause behavior, toggle **Start with Windows**, or quit.
 
@@ -44,7 +47,7 @@ A 4K video on 1080p screens wastes memory: each player keeps 4K decoder surfaces
 **Span across monitors** (setting): one player covers all your monitors with a single stretched picture. This uses the least memory, but each screen shows only part of the image.
 
 ## Diagnostics
-Run `LiteWall.exe --tray --log` to write `%APPDATA%\LiteWall\litewall.log`. It contains mpv's log, any rejected options, the window layout, and `STAT` lines with RAM/CPU once a second for 30 s. `--no-video`, `--per-monitor` and `--span` are for A/B tests. `--rotate-secs N` changes the wallpaper every N seconds for testing; it uses Shuffle if rotation is Off and isn't saved.
+Run `LiteWall.exe --tray --log` to write `%APPDATA%\LiteWall\litewall.log`. It contains mpv's log, any rejected options, the window layout, and `STAT` lines with RAM/CPU once a second for 30 s. `--no-video`, `--per-monitor` and `--span` are for A/B tests. `--test-settings` cycles canvas, fps and Fill live every 5 s, then applies the next library item twice (each step is logged as live update, hot-swap or full rebuild). `--rotate-secs N` changes the wallpaper every N seconds for testing; it uses Shuffle if rotation is Off and isn't saved.
 
 ## How it stays light
 
