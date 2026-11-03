@@ -21,7 +21,9 @@
 #define WM_TRAY (WM_APP + 1)
 #define WM_MPV_WAKE (WM_APP + 2)
 #define ID_TIMER 1
-enum { IDM_LIBRARY = 99, IDM_CHOOSE = 100, IDM_PAUSE, IDM_STARTUP, IDM_BATTERY, IDM_MAXIMIZED, IDM_FIT, IDM_QUIT };
+enum { IDM_LIBRARY = 99, IDM_CHOOSE = 100, IDM_PAUSE, IDM_STARTUP, IDM_BATTERY, IDM_MAXIMIZED, IDM_FIT, IDM_QUIT, IDM_NEXT = 120, IDM_ROT0 = 130, IDM_EVERY0 = 140 };
+#define ID_ROT_TIMER 8
+#define ID_HOTKEY_NEXT 1
 
 #define MAX_MON 8
 typedef struct { HWND hwnd; RECT rc, wr; int paused; int grp; } Screen; // rc = monitor, wr = our window
@@ -61,6 +63,16 @@ static int g_mute = 1, g_speedPct = 100;
 static wchar_t g_appdir[MAX_PATH];
 static const wchar_t *screen_file(int i) { return (i < MAX_MON && g_monFile[i][0]) ? g_monFile[i] : g_file; }
 static void ui_open(void);
+/* rotation (v0.3.5) */
+enum { ROT_OFF = 0, ROT_ORDER, ROT_SHUFFLE, ROT_RANDOM };
+enum { EVERY_LOOP = 0, EVERY_STARTUP = 7, EVERY_N = 8 };
+static const int k_everySecs[EVERY_N] = {0, 60, 300, 900, 1800, 3600, 86400, 0};
+static int g_rotMode = ROT_OFF, g_rotEvery = 2, g_rotCliSecs = 0;
+static void rot_sync(void);
+static void rot_settings_changed(void);
+static void rot_next(const char *why);
+static int rot_included(const wchar_t *path);
+static void rot_set_included(const wchar_t *path, int on);
 
 /* ---------- settings ---------- */
 static void load_settings(void) {
@@ -80,6 +92,8 @@ static void load_settings(void) {
     g_spanSetting = GetPrivateProfileIntW(L"main", L"span", 0, g_ini);
     g_fpsCap = GetPrivateProfileIntW(L"main", L"fps_cap", 30, g_ini);
     g_canvasPct = GetPrivateProfileIntW(L"main", L"canvas_pct", 75, g_ini);
+    g_rotMode = GetPrivateProfileIntW(L"main", L"rotation_mode", ROT_OFF, g_ini); if (g_rotMode < 0 || g_rotMode > ROT_RANDOM) g_rotMode = ROT_OFF;
+    g_rotEvery = GetPrivateProfileIntW(L"main", L"rotation_every", 2, g_ini); if (g_rotEvery < 0 || g_rotEvery >= EVERY_N) g_rotEvery = 2;
     for (int i = 0; i < MAX_MON; i++) { wchar_t k[16]; swprintf(k, 16, L"file%d", i); GetPrivateProfileStringW(L"main", k, L"", g_monFile[i], MAX_PATH * 2, g_ini); }
 }
 static void save_int(const wchar_t *k, int v) { wchar_t b[16]; swprintf(b, 16, L"%d", v); WritePrivateProfileStringW(L"main", k, b, g_ini); }
@@ -87,6 +101,7 @@ static void save_settings(void) {
     WritePrivateProfileStringW(L"main", L"file", g_file, g_ini);
     save_int(L"paused", g_userPaused); save_int(L"pause_on_battery", g_pauseOnBattery);
     save_int(L"pause_on_maximized", g_pauseOnMaximized); save_int(L"fill", g_fill); save_int(L"mute", g_mute); save_int(L"speed_pct", g_speedPct); save_int(L"optimize", g_optimize); save_int(L"span", g_spanSetting); save_int(L"fps_cap", g_fpsCap); save_int(L"canvas_pct", g_canvasPct);
+    save_int(L"rotation_mode", g_rotMode); save_int(L"rotation_every", g_rotEvery);
     for (int i = 0; i < MAX_MON; i++) { wchar_t k[16]; swprintf(k, 16, L"file%d", i); WritePrivateProfileStringW(L"main", k, g_monFile[i], g_ini); }
 }
 
@@ -182,6 +197,7 @@ static mpv_handle *mpv_start(HWND wid_wnd, const wchar_t *shader) {
         char sp8[MAX_PATH * 6]; to_utf8(shader, sp8, sizeof sp8);
         setopt(m, "glsl-shaders", sp8); setopt(m, "keepaspect", "no"); setopt(m, "panscan", "0.0");
     } else setopt(m, "panscan", g_fill ? "1.0" : "0.0");
+    if (g_rotMode != ROT_OFF && g_rotEvery == EVERY_LOOP && !g_rotCliSecs) { setopt(m, "loop-file", "no"); setopt(m, "keep-open", "no"); }
     if (g_fpsCap > 0) { char b[16]; snprintf(b, sizeof b, "%d", g_fpsCap); setopt(m, "override-display-fps", b); }
     setopt(m, "gpu-shader-cache", "no"); setopt(m, "icc-profile-auto", "no");
     if (g_mpvOpts[0]) {   // user overrides last, so they win
@@ -207,6 +223,7 @@ static void mpv_load_group(Group *G, int tw, int th) {
     char path[MAX_PATH * 6]; to_utf8(f, path, sizeof path);
     const char *cmd[] = {"loadfile", path, NULL};
     mpv_command_async(G->mpv, 0, cmd);
+    if (G->paused == 1) mpv_set_property_string(G->mpv, "pause", "yes");
 }
 
 /* ---------- wallpaper windows ---------- */
@@ -472,6 +489,7 @@ static void apply_pause(void) {
         SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &t, sizeof t);
         if (all) { Sleep(150); EmptyWorkingSet(GetCurrentProcess()); }
     }
+    rot_sync();
 }
 
 /* ---------- tray ---------- */
@@ -502,6 +520,20 @@ static void show_menu(HWND h) {
     AppendMenuW(m, MF_STRING | MF_DEFAULT, IDM_LIBRARY, L"Open library...");
     AppendMenuW(m, MF_STRING, IDM_CHOOSE, L"Choose file...");
     AppendMenuW(m, MF_STRING | (g_userPaused ? MF_CHECKED : 0), IDM_PAUSE, L"Pause");
+    AppendMenuW(m, MF_STRING, IDM_NEXT, L"Next wallpaper\tCtrl+Alt+Right");
+    {
+        HMENU r = CreatePopupMenu();
+        static const wchar_t *mn[] = {L"Off", L"In order", L"Shuffle", L"Random"};
+        for (int i = 0; i < 4; i++) AppendMenuW(r, MF_STRING, IDM_ROT0 + i, mn[i]);
+        CheckMenuRadioItem(r, IDM_ROT0, IDM_ROT0 + 3, IDM_ROT0 + g_rotMode, MF_BYCOMMAND);
+        AppendMenuW(r, MF_SEPARATOR, 0, NULL);
+        HMENU e = CreatePopupMenu();
+        static const wchar_t *en[] = {L"After each loop", L"1 minute", L"5 minutes", L"15 minutes", L"30 minutes", L"1 hour", L"1 day", L"On startup only"};
+        for (int i = 0; i < EVERY_N; i++) AppendMenuW(e, MF_STRING, IDM_EVERY0 + i, en[i]);
+        CheckMenuRadioItem(e, IDM_EVERY0, IDM_EVERY0 + EVERY_N - 1, IDM_EVERY0 + g_rotEvery, MF_BYCOMMAND);
+        AppendMenuW(r, MF_POPUP, (UINT_PTR)e, L"Change every");
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)r, L"Rotation");
+    }
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING | (g_fill ? MF_CHECKED : 0), IDM_FIT, L"Fill screen (crop)");
     AppendMenuW(m, MF_STRING | (g_pauseOnMaximized ? MF_CHECKED : 0), IDM_MAXIMIZED, L"Pause when a window is maximized");
@@ -524,6 +556,140 @@ static void restore_static_wallpaper(void) {
 #include "optimizer.c"
 #include "ui.c"
 
+/* ---------- rotation / shuffle (v0.3.5) ----------
+   Costs nothing when Off: no timer, no hooks beyond one branch in apply_pause. When on, a single
+   one-shot WM_TIMER is armed for the remaining active time; it is killed while everything is paused
+   (game, lock, covered, battery) so time does not advance, and a due switch is deferred until resume.
+   Switching reuses the running mpv player(s) with loadfile (replace). */
+static int g_rotRunning, g_rotPending; static DWORD g_rotStart, g_rotRemainMs, g_rotLastSwitch;
+static unsigned *g_rotPlayed; static int g_rotNPlayed, g_rotCapPlayed;
+static int rot_mode_eff(void) { return g_rotMode != ROT_OFF ? g_rotMode : (g_rotCliSecs ? ROT_SHUFFLE : ROT_OFF); }
+static int is_still_image(const wchar_t *p) { const wchar_t *e = wcsrchr(p, L'.'); return p[0] && !is_video_ext(p) && !(e && !_wcsicmp(e, L".gif")); }
+static int rot_interval_secs(void) {   // 0 = not timer driven
+    if (g_rotCliSecs) return g_rotCliSecs;
+    if (g_rotEvery == EVERY_LOOP) return is_still_image(g_file) ? 60 : 0;   // stills never "end": change every minute
+    return k_everySecs[g_rotEvery];
+}
+static int rot_included(const wchar_t *path) { return !GetPrivateProfileIntW(L"rotation_exclude", base_name(path), 0, g_ini); }
+static void rot_set_included(const wchar_t *path, int on) {
+    WritePrivateProfileStringW(L"rotation_exclude", base_name(path), on ? NULL : L"1", g_ini);
+    LOG("rotation: %ls %s", base_name(path), on ? "included" : "excluded");
+}
+// Included library files in list (name) order. Caller frees.
+static int rot_list(wchar_t (**out)[MAX_PATH * 2]) {
+    wchar_t d[MAX_PATH], pat[MAX_PATH]; lib_dir(d); swprintf(pat, MAX_PATH, L"%s\\*", d);
+    WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW(pat, &fd); int n = 0, cap = 0; *out = NULL;
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY || !is_media(fd.cFileName)) continue;
+        wchar_t f[MAX_PATH * 2]; swprintf(f, MAX_PATH * 2, L"%s\\%s", d, fd.cFileName);
+        if (!rot_included(f)) continue;
+        if (n == cap) { cap = cap ? cap * 2 : 32; *out = realloc(*out, cap * sizeof **out); }
+        wcscpy((*out)[n++], f);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return n;
+}
+static int rot_was_played(unsigned hsh) { for (int i = 0; i < g_rotNPlayed; i++) if (g_rotPlayed[i] == hsh) return 1; return 0; }
+static void rot_mark_played(unsigned hsh) {
+    if (rot_was_played(hsh)) return;
+    if (g_rotNPlayed == g_rotCapPlayed) { g_rotCapPlayed = g_rotCapPlayed ? g_rotCapPlayed * 2 : 32; g_rotPlayed = realloc(g_rotPlayed, g_rotCapPlayed * sizeof *g_rotPlayed); }
+    g_rotPlayed[g_rotNPlayed++] = hsh;
+}
+static int rot_pick(wchar_t *dst, int mode) {
+    wchar_t (*L)[MAX_PATH * 2]; int n = rot_list(&L);
+    if (!n) { free(L); return 0; }
+    int cur = -1; for (int i = 0; i < n; i++) if (!_wcsicmp(L[i], g_file)) cur = i;
+    int pick = 0;
+    if (n == 1) pick = 0;
+    else if (mode == ROT_ORDER) {
+        if (cur >= 0) pick = (cur + 1) % n;
+        else {   // current not in the playlist: next one after it by name
+            pick = 0; for (int i = 0; i < n; i++) if (_wcsicmp(L[i], g_file) > 0) { pick = i; break; }
+        }
+    } else if (mode == ROT_RANDOM) {
+        pick = rand() % (n - (cur >= 0)); if (cur >= 0 && pick >= cur) pick++;
+    } else {   // shuffle bag: no repeats until all have played, never the same twice in a row
+        if (g_file[0]) rot_mark_played(fnv(g_file));
+        int left = 0; for (int i = 0; i < n; i++) if (i != cur && !rot_was_played(fnv(L[i]))) left++;
+        if (!left) { g_rotNPlayed = 0; if (g_file[0]) rot_mark_played(fnv(g_file)); LOG("rotation: shuffle round complete, reshuffling"); left = n - (cur >= 0); }
+        int k = rand() % left;
+        for (int i = 0; i < n; i++) if (i != cur && !rot_was_played(fnv(L[i])) && k-- == 0) { pick = i; break; }
+        rot_mark_played(fnv(L[pick]));
+    }
+    wcscpy(dst, L[pick]); free(L);
+    return 1;
+}
+static void rot_reset(void) {
+    if (g_rotRunning) { KillTimer(g_msg, ID_ROT_TIMER); g_rotRunning = 0; }
+    g_rotRemainMs = (DWORD)rot_interval_secs() * 1000u; g_rotPending = 0;
+    rot_sync();
+}
+static void rot_switch_to(const wchar_t *f, const char *why) {
+    wchar_t old[MAX_PATH * 2]; wcscpy(old, g_file);
+    wcscpy(g_file, f); save_settings();
+    g_rotLastSwitch = GetTickCount();
+    LOG("rotation: %s -> %ls (was %ls)", why, base_name(f), old[0] ? base_name(old) : L"(none)");
+    int done = 0;
+    for (int g = 0; g < g_ngrp; g++) if (g_grp[g].mpv && (!old[0] || !_wcsicmp(g_grp[g].file, old))) {
+        wcscpy(g_grp[g].file, f); mpv_load_group(&g_grp[g], g_maxW, g_maxH); done = 1;   // reuse player
+    }
+    if (!done) { create_screens(); apply_pause(); }
+    else opt_kick();   // a not-yet-optimized item plays its original now; WM_OPT_DONE reloads it later
+}
+static void rot_next(const char *why) {
+    int mode = rot_mode_eff(); if (mode == ROT_OFF) mode = ROT_ORDER;   // manual "next" works with rotation off
+    wchar_t f[MAX_PATH * 2];
+    if (!rot_pick(f, mode)) { LOG("rotation: %s - no wallpapers in the rotation playlist", why); return; }
+    rot_switch_to(f, why);
+    rot_reset();   // restart the interval after any switch (manual included)
+}
+static void rot_sync(void) {
+    int mode = rot_mode_eff();
+    if (mode == ROT_OFF) { if (g_rotRunning) { KillTimer(g_msg, ID_ROT_TIMER); g_rotRunning = 0; } g_rotPending = 0; return; }
+    int paused = g_allPaused == 1;
+    if (g_rotPending && !paused) { g_rotPending = 0; rot_next("deferred switch (resumed)"); return; }
+    int secs = rot_interval_secs();
+    int want = secs > 0 && !paused && g_file[0];
+    if (want && !g_rotRunning) {
+        if (!g_rotRemainMs) g_rotRemainMs = (DWORD)secs * 1000u;
+        g_rotStart = GetTickCount(); SetTimer(g_msg, ID_ROT_TIMER, g_rotRemainMs, NULL); g_rotRunning = 1;
+        LOG("rotation timer armed: %lus left", g_rotRemainMs / 1000);
+    } else if (!want && g_rotRunning) {
+        DWORD el = GetTickCount() - g_rotStart; g_rotRemainMs = el >= g_rotRemainMs ? 1000 : g_rotRemainMs - el;
+        KillTimer(g_msg, ID_ROT_TIMER); g_rotRunning = 0;
+        LOG("rotation timer held (paused), %lus left", g_rotRemainMs / 1000);
+    }
+}
+static void rot_timer_fired(void) {
+    KillTimer(g_msg, ID_ROT_TIMER); g_rotRunning = 0; g_rotRemainMs = 0;
+    if (g_allPaused == 1) { g_rotPending = 1; LOG("rotation due while paused - deferred"); return; }
+    rot_next("timer");
+}
+static void rot_on_eof(int grp) {
+    if (rot_mode_eff() == ROT_OFF || g_rotEvery != EVERY_LOOP || g_rotCliSecs) return;
+    if (_wcsicmp(g_grp[grp].file, g_file) || GetTickCount() - g_rotLastSwitch < 1500) return;   // one switch per loop
+    if (g_allPaused == 1) { g_rotPending = 1; LOG("rotation: loop ended while paused - deferred"); return; }
+    rot_next("end of loop");
+}
+static void rot_settings_changed(void) {
+    int loopMode = rot_mode_eff() != ROT_OFF && g_rotEvery == EVERY_LOOP && !g_rotCliSecs;
+    players_set_string("loop-file", loopMode ? "no" : "inf"); players_set_string("keep-open", loopMode ? "no" : "yes");
+    static const char *mn[] = {"off", "in order", "shuffle", "random"};
+    LOG("rotation settings: mode=%s every=%d (%ds) cli_secs=%d", mn[rot_mode_eff()], g_rotEvery, rot_interval_secs(), g_rotCliSecs);
+    g_rotNPlayed = 0; rot_reset();
+}
+static void rot_startup(void) {
+    srand(GetTickCount() ^ GetCurrentProcessId());
+    if (rot_mode_eff() == ROT_OFF) return;
+    static const char *mn[] = {"off", "in order", "shuffle", "random"};
+    LOG("rotation: mode=%s every=%d (%ds)%s", mn[rot_mode_eff()], g_rotEvery, rot_interval_secs(), g_rotCliSecs ? " [--rotate-secs]" : "");
+    if (g_rotEvery == EVERY_STARTUP && !g_rotCliSecs) {
+        wchar_t f[MAX_PATH * 2]; if (rot_pick(f, rot_mode_eff())) { wcscpy(g_file, f); save_settings(); LOG("rotation: startup -> %ls", base_name(f)); }
+    }
+    g_rotRemainMs = (DWORD)rot_interval_secs() * 1000u;
+}
+
 static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == g_taskbarCreated && msg) { tray_add(); create_screens(); return 0; } // Explorer restarted
     switch (msg) {
@@ -542,6 +708,11 @@ static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_BATTERY: g_pauseOnBattery = !g_pauseOnBattery; save_settings(); break;
         case IDM_STARTUP: set_startup(!startup_enabled()); break;
         case IDM_QUIT: DestroyWindow(h); return 0;
+        case IDM_NEXT: rot_next("manual (tray)"); return 0;
+        default:
+            if (LOWORD(wp) >= IDM_ROT0 && LOWORD(wp) <= IDM_ROT0 + 3) { g_rotMode = LOWORD(wp) - IDM_ROT0; save_settings(); rot_settings_changed(); }
+            else if (LOWORD(wp) >= IDM_EVERY0 && LOWORD(wp) < IDM_EVERY0 + EVERY_N) { g_rotEvery = LOWORD(wp) - IDM_EVERY0; save_settings(); rot_settings_changed(); }
+            break;
         }
         apply_pause();
         return 0;
@@ -550,6 +721,7 @@ static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         for (int i = 0; i < g_ngrp; i++) if (g_grp[i].mpv == m) {
             for (;;) {
                 mpv_event *e = mpv_wait_event(m, 0); if (e->event_id == MPV_EVENT_NONE) break;
+                if (e->event_id == MPV_EVENT_END_FILE && ((mpv_event_end_file *)e->data)->reason == MPV_END_FILE_REASON_EOF) rot_on_eof(i);
                 if (!g_logf) continue;
                 if (e->event_id == MPV_EVENT_LOG_MESSAGE) {
                     mpv_event_log_message *lm = e->data;
@@ -561,7 +733,10 @@ static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
-    case WM_TIMER: if (!surfaces_healthy()) reattach_screens(); apply_pause(); return 0;
+    case WM_HOTKEY: if (wp == ID_HOTKEY_NEXT) rot_next("manual (Ctrl+Alt+Right)"); return 0;
+    case WM_TIMER:
+        if (wp == ID_ROT_TIMER) { rot_timer_fired(); return 0; }
+        if (!surfaces_healthy()) reattach_screens(); apply_pause(); return 0;
     case WM_WTSSESSION_CHANGE:
         if (wp == WTS_SESSION_LOCK) g_locked = 1; else if (wp == WTS_SESSION_UNLOCK) g_locked = 0;
         apply_pause(); return 0;
@@ -570,7 +745,7 @@ static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == WM_DISPLAYCHANGE) SetTimer(h, 2, 1500, NULL);   // debounce, then rebuild
         return 0;
     case WM_DESTROY:
-        KillTimer(h, ID_TIMER); WTSUnRegisterSessionNotification(h);
+        KillTimer(h, ID_TIMER); KillTimer(h, ID_ROT_TIMER); UnregisterHotKey(h, ID_HOTKEY_NEXT); WTSUnRegisterSessionNotification(h);
         Shell_NotifyIconW(NIM_DELETE, &g_nid); destroy_screens(); restore_static_wallpaper();
         PostQuitMessage(0); return 0;
     }
@@ -626,6 +801,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
             if (!wcscmp(argv[i], L"--mpv-opts") && i + 1 < argc) WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, g_mpvOpts, sizeof g_mpvOpts, NULL, NULL);
             else if (!wcscmp(argv[i], L"--canvas-scale") && i + 1 < argc) g_cliCanvas = _wtoi(argv[++i]);
             else if (!wcscmp(argv[i], L"--fps-cap") && i + 1 < argc) g_cliFps = _wtoi(argv[++i]);
+            else if (!wcscmp(argv[i], L"--rotate-secs") && i + 1 < argc) { g_rotCliSecs = _wtoi(argv[++i]); if (g_rotCliSecs < 1) g_rotCliSecs = 0; }
             else if (!wcscmp(argv[i], L"--stat-secs") && i + 1 < argc) { g_statSecs = _wtoi(argv[++i]); if (g_statSecs < 12) g_statSecs = 12; }
         }
         LocalFree(argv);
@@ -636,7 +812,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
             g_logf = _wfopen(lp, L"w");
             OSVERSIONINFOW ov = {sizeof ov};
             typedef LONG(WINAPI * RtlGV)(OSVERSIONINFOW *); RtlGV rg = (RtlGV)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"); if (rg) rg(&ov);
-            LOG("LiteWall 0.3.4  cmdline=%ls", cl);
+            LOG("LiteWall 0.3.5  cmdline=%ls", cl);
             LOG("Windows %lu.%lu build %lu; settings file=%ls fill=%d mute=%d speed=%d", ov.dwMajorVersion, ov.dwMinorVersion, ov.dwBuildNumber, g_file, g_fill, g_mute, g_speedPct);
             DISPLAY_DEVICEW dd = {sizeof dd}; for (DWORD i = 0; EnumDisplayDevicesW(NULL, i, &dd, 0); i++) { if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) LOG("display %ls: %ls", dd.DeviceName, dd.DeviceString); dd.cb = sizeof dd; }
         }
@@ -657,6 +833,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
 
     { INITCOMMONCONTROLSEX ic = {sizeof ic, ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES}; InitCommonControlsEx(&ic); }
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (RegisterHotKey(g_msg, ID_HOTKEY_NEXT, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_RIGHT)) LOG("hotkey Ctrl+Alt+Right registered");
+    else LOG("hotkey Ctrl+Alt+Right unavailable (err=%lu) - ignored", GetLastError());
+    rot_startup();
     create_screens();
     if (!wcsstr(GetCommandLineW(), L"--tray")) ui_open();   // autostart passes --tray
     apply_pause();

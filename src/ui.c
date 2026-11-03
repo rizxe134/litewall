@@ -12,7 +12,8 @@
 #define PW 300
 #define PH 169
 enum { IDC_LIST = 1000, IDC_SEARCH, IDC_ADD, IDC_PREVIEW, IDC_NAME, IDC_RES, IDC_MON, IDC_APPLY, IDC_REMOVE,
-       IDC_FILL, IDC_PMAX, IDC_PBAT, IDC_START, IDC_MUTE, IDC_SPEED, IDC_HDR1, IDC_HDR2, IDC_SPEEDLBL, IDC_MONLBL, IDC_OPT, IDC_SPAN, IDC_FPS, IDC_FPSLBL, IDC_CANVAS, IDC_CANVASLBL };
+       IDC_FILL, IDC_PMAX, IDC_PBAT, IDC_START, IDC_MUTE, IDC_SPEED, IDC_HDR1, IDC_HDR2, IDC_SPEEDLBL, IDC_MONLBL, IDC_OPT, IDC_SPAN, IDC_FPS, IDC_FPSLBL, IDC_CANVAS, IDC_CANVASLBL,
+       IDC_ROT, IDC_ROTLBL, IDC_EVERY, IDC_EVERYLBL, IDC_INCL, IDC_NEXT };
 
 typedef struct { wchar_t path[MAX_PATH * 2]; wchar_t name[MAX_PATH]; int w, h, img, ready; } Item;
 
@@ -191,6 +192,7 @@ static void update_panel(void) {
         if (w) swprintf(b, 96, L"%d \u00d7 %d   \u2022   %s", w, h, e ? e + 1 : L""); else swprintf(b, 96, L"%s", e ? e + 1 : L"");
         SetDlgItemTextW(g_ui, IDC_RES, b);
     }
+    CheckDlgButton(g_ui, IDC_INCL, i >= 0 && rot_included(g_items[i].path)); EnableWindow(GetDlgItem(g_ui, IDC_INCL), i >= 0);
     EnableWindow(GetDlgItem(g_ui, IDC_APPLY), i >= 0); EnableWindow(GetDlgItem(g_ui, IDC_REMOVE), i >= 0);
     InvalidateRect(g_preview, NULL, FALSE);
 }
@@ -224,6 +226,7 @@ static void sync_settings_ui(void) {
     CheckDlgButton(g_ui, IDC_PBAT, g_pauseOnBattery); CheckDlgButton(g_ui, IDC_START, startup_enabled()); CheckDlgButton(g_ui, IDC_MUTE, g_mute);
     SendDlgItemMessageW(g_ui, IDC_FPS, CB_SETCURSEL, g_fpsCap == 30 ? 0 : g_fpsCap == 60 ? 1 : 2, 0);
     SendDlgItemMessageW(g_ui, IDC_CANVAS, CB_SETCURSEL, g_canvasPct >= 100 ? 0 : g_canvasPct >= 75 ? 1 : 2, 0);
+    SendDlgItemMessageW(g_ui, IDC_ROT, CB_SETCURSEL, g_rotMode, 0); SendDlgItemMessageW(g_ui, IDC_EVERY, CB_SETCURSEL, g_rotEvery, 0);
     CheckDlgButton(g_ui, IDC_OPT, g_optimize); CheckDlgButton(g_ui, IDC_SPAN, g_spanSetting);
     static const int sp[] = {25, 50, 75, 100, 125, 150, 200}; HWND c = GetDlgItem(g_ui, IDC_SPEED);
     for (int i = 0; i < 7; i++) if (sp[i] == g_speedPct) SendMessageW(c, CB_SETCURSEL, i, 0);
@@ -235,7 +238,7 @@ static HWND mk(const wchar_t *cls, const wchar_t *txt, DWORD st, int id) {
 }
 static void layout(void) {
     RECT r; GetClientRect(g_ui, &r); int W = r.right, H = r.bottom, P = 340, m = 16;
-    HDWP d = BeginDeferWindowPos(34);
+    HDWP d = BeginDeferWindowPos(42);
 #define MV(id, x, y, w, h) d = DeferWindowPos(d, GetDlgItem(g_ui, id), NULL, x, y, w, h, SWP_NOZORDER)
     MV(IDC_SEARCH, m, m, 280, 28); MV(IDC_ADD, m + 292, m, 150, 28);
     MV(IDC_LIST, m, m + 44, W - P - 2 * m, H - m - 44 - m);
@@ -243,14 +246,17 @@ static void layout(void) {
     MV(IDC_PREVIEW, x, y, PW, PH); y += PH + 12;
     MV(IDC_NAME, x, y, pw, 26); y += 28; MV(IDC_RES, x, y, pw, 20); y += 30;
     MV(IDC_MONLBL, x, y, pw, 18); y += 20; MV(IDC_MON, x, y, pw, 200); y += 34;
-    MV(IDC_APPLY, x, y, 190, 32); MV(IDC_REMOVE, x + 200, y, pw - 200, 32); y += 50;
+    MV(IDC_APPLY, x, y, 190, 32); MV(IDC_REMOVE, x + 200, y, pw - 200, 32); y += 40;
+    MV(IDC_INCL, x, y, pw, 22); y += 34;
     MV(IDC_HDR2, x, y, pw, 20); y += 26;
     MV(IDC_FILL, x, y, pw, 22); y += 26; MV(IDC_PMAX, x, y, pw, 22); y += 26; MV(IDC_PBAT, x, y, pw, 22); y += 26;
     MV(IDC_START, x, y, pw, 22); y += 26; MV(IDC_MUTE, x, y, pw, 22); y += 26;
     MV(IDC_OPT, x, y, pw, 22); y += 26; MV(IDC_SPAN, x, y, pw, 22); y += 32;
     MV(IDC_SPEEDLBL, x, y + 4, 110, 20); MV(IDC_SPEED, x + 115, y, 100, 200); y += 32;
     MV(IDC_FPSLBL, x, y + 4, 110, 20); MV(IDC_FPS, x + 115, y, 100, 200); y += 32;
-    MV(IDC_CANVASLBL, x, y + 4, 110, 20); MV(IDC_CANVAS, x + 115, y, 170, 200);
+    MV(IDC_CANVASLBL, x, y + 4, 110, 20); MV(IDC_CANVAS, x + 115, y, 170, 200); y += 32;
+    MV(IDC_ROTLBL, x, y + 4, 110, 20); MV(IDC_ROT, x + 115, y, 100, 200); MV(IDC_NEXT, x + 225, y, pw - 225, 26); y += 32;
+    MV(IDC_EVERYLBL, x, y + 4, 110, 20); MV(IDC_EVERY, x + 115, y, 170, 300);
 #undef MV
     EndDeferWindowPos(d);
 }
@@ -310,6 +316,15 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         mk(L"STATIC", L"Multi-monitor quality", 0, IDC_CANVASLBL);
         { HWND c = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, IDC_CANVAS); SetWindowTheme(c, L"DarkMode_CFD", NULL);
           SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Full (100%)"); SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Balanced (75%)"); SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)L"Light (50%)"); }
+        SetWindowTheme(mk(L"BUTTON", L"Include in rotation", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_INCL), L"", L"");
+        mk(L"STATIC", L"Rotation", 0, IDC_ROTLBL);
+        { HWND c = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, IDC_ROT); SetWindowTheme(c, L"DarkMode_CFD", NULL);
+          const wchar_t *t[] = {L"Off", L"In order", L"Shuffle", L"Random"}; for (int i = 0; i < 4; i++) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)t[i]); }
+        mk(L"BUTTON", L"Next \u25B6", BS_OWNERDRAW | WS_TABSTOP, IDC_NEXT);
+        mk(L"STATIC", L"Change every", 0, IDC_EVERYLBL);
+        { HWND c = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, IDC_EVERY); SetWindowTheme(c, L"DarkMode_CFD", NULL);
+          const wchar_t *t[] = {L"After each loop", L"1 minute", L"5 minutes", L"15 minutes", L"30 minutes", L"1 hour", L"1 day", L"On startup only"};
+          for (int i = 0; i < 8; i++) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)t[i]); }
         mk(L"STATIC", L"Playback speed", 0, IDC_SPEEDLBL);
         HWND sp = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, IDC_SPEED); SetWindowTheme(sp, L"DarkMode_CFD", NULL);
         const wchar_t *spt[] = {L"0.25\u00d7", L"0.5\u00d7", L"0.75\u00d7", L"1\u00d7", L"1.25\u00d7", L"1.5\u00d7", L"2\u00d7"};
@@ -335,14 +350,14 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         lastRow = row;
     } return 0;
     case WM_SIZE: layout(); return 0;
-    case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x = 860; ((MINMAXINFO *)lp)->ptMinTrackSize.y = 780; return 0;
+    case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x = 860; ((MINMAXINFO *)lp)->ptMinTrackSize.y = 860; return 0;
     case WM_ERASEBKGND: {
         RECT r; GetClientRect(h, &r); FillRect((HDC)wp, &r, g_brBg);
         RECT p = r; p.left = r.right - 340 - 8; FillRect((HDC)wp, &p, g_brPanel); return 1;
     }
     case WM_CTLCOLORSTATIC: case WM_CTLCOLORBTN: {
         HWND c = (HWND)lp; int id = GetDlgCtrlID(c);
-        SetTextColor((HDC)wp, (id == IDC_RES || id == IDC_HDR2 || id == IDC_MONLBL || id == IDC_SPEEDLBL) ? C_DIM : C_TEXT);
+        SetTextColor((HDC)wp, (id == IDC_RES || id == IDC_HDR2 || id == IDC_MONLBL || id == IDC_SPEEDLBL || id == IDC_ROTLBL || id == IDC_EVERYLBL) ? C_DIM : C_TEXT);
         SetBkColor((HDC)wp, C_PANEL); return (LRESULT)g_brPanel;
     }
     case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX:
@@ -435,6 +450,15 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             else g_canvasPct = k == 0 ? 100 : k == 1 ? 75 : 50;
             save_settings(); create_screens(); apply_pause();
         }
+        else if ((id == IDC_ROT || id == IDC_EVERY) && code == CBN_SELCHANGE) {
+            int k = (int)SendDlgItemMessageW(h, id, CB_GETCURSEL, 0, 0); if (k < 0) return 0;
+            if (id == IDC_ROT) g_rotMode = k; else g_rotEvery = k;
+            save_settings(); rot_settings_changed();
+        }
+        else if (id == IDC_NEXT) rot_next("manual (library window)");
+        else if (id == IDC_INCL && code == BN_CLICKED) {
+            int i = sel_index(); if (i >= 0) rot_set_included(g_items[i].path, IsDlgButtonChecked(h, IDC_INCL) == BST_CHECKED);
+        }
         else if (id == IDC_SPEED && code == CBN_SELCHANGE) {
             static const int sp[] = {25, 50, 75, 100, 125, 150, 200};
             int k = (int)SendDlgItemMessageW(h, IDC_SPEED, CB_GETCURSEL, 0, 0); if (k >= 0 && k < 7) g_speedPct = sp[k];
@@ -465,6 +489,6 @@ static void ui_open(void) {
         wc.hCursor = LoadCursorW(NULL, IDC_ARROW); wc.hIcon = LoadIconW(g_inst, MAKEINTRESOURCEW(1)); RegisterClassExW(&wc); reg = 1;
     }
     HWND w = CreateWindowExW(WS_EX_ACCEPTFILES, L"LiteWallLibrary", L"LiteWall \u2014 Library", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 1180, 820, NULL, NULL, g_inst, NULL);
+                             CW_USEDEFAULT, CW_USEDEFAULT, 1180, 880, NULL, NULL, g_inst, NULL);
     ShowWindow(w, SW_SHOW); SetForegroundWindow(w);
 }

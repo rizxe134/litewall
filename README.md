@@ -15,9 +15,17 @@ This is a dark, native Win32 window, modeled on Wallpaper Engine. It opens when 
 * Settings: Fill/fit, pause when maximized, pause on battery, start with Windows, mute, and playback speed.
 * Closing the window *destroys* it and frees all thumbnails and other UI resources, then trims memory. LiteWall stays in the tray. Starting with Windows launches it straight to the tray.
 
+## Rotation and shuffle (v0.3.5)
+LiteWall can change the wallpaper by itself. Set it under **Rotation** and **Change every** in the library window's settings, or from the tray icon's **Rotation** menu.
+* Modes: **Off** (the default), **In order** (library order), **Shuffle** (plays everything once before repeating, and never the same one twice in a row), and **Random** (never the same one twice in a row).
+* Change every: after each loop, 1 / 5 / 15 / 30 minutes, 1 hour, 1 day, or on startup only. Still images switch after 1 minute in "after each loop" mode.
+* **Next wallpaper**: tray menu, the **Next ▶** button, or **Ctrl+Alt+Right** (skipped if another app already uses that hotkey).
+* Untick **Include in rotation** on a selected wallpaper to keep it out of the rotation. Everything is included by default.
+* Switching reuses the running player and plays the optimized copy. The timer doesn't run while LiteWall is paused (game, lock screen, covered, battery), so a switch that comes due then waits until playback resumes. With rotation Off, nothing extra runs.
+
 ## Install
 
-1. Download `LiteWall-v0.3.4-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
+1. Download `LiteWall-v0.3.5-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
 2. Run `LiteWall.exe`, drag a video, GIF, or image into the library, and click **Apply**. That's the whole setup.
 3. Right-click the tray icon to change the wallpaper, pause, change auto-pause behavior, toggle **Start with Windows**, or quit.
 
@@ -35,7 +43,7 @@ A 4K video on 1080p screens wastes memory: each player keeps 4K decoder surfaces
 **Span across monitors** (setting): one player covers all your monitors with a single stretched picture. This uses the least memory, but each screen shows only part of the image.
 
 ## Diagnostics
-Run `LiteWall.exe --tray --log` to write `%APPDATA%\LiteWall\litewall.log`. It contains mpv's log, any rejected options, the window layout, and `STAT` lines with RAM/CPU once a second for 30 s. `--no-video`, `--per-monitor` and `--span` are for A/B tests.
+Run `LiteWall.exe --tray --log` to write `%APPDATA%\LiteWall\litewall.log`. It contains mpv's log, any rejected options, the window layout, and `STAT` lines with RAM/CPU once a second for 30 s. `--no-video`, `--per-monitor` and `--span` are for A/B tests. `--rotate-secs N` changes the wallpaper every N seconds for testing; it uses Shuffle if rotation is Off and isn't saved.
 
 ## How it stays light
 
