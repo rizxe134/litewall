@@ -175,6 +175,41 @@ static void destroy_screens(void) {
     memset(g_scr, 0, sizeof g_scr); g_nscr = 0; g_allPaused = -1;
 }
 
+/* ---------- virtual-desktop / Explorer resilience ---------- */
+// Cheap check: is our surface still attached to a live, visible wallpaper host?
+static int surfaces_healthy(void) {
+    if (!g_nscr) return 1;
+    if (!IsWindow(g_workerw) || !IsWindowVisible(g_workerw)) return 0;
+    for (int i = 0; i < g_nscr; i++) {
+        HWND w = g_scr[i].hwnd;
+        if (!w || !screen_file(i)[0]) continue;
+        if (!IsWindow(w) || GetParent(w) != g_workerw || !IsWindowVisible(w)) return 0;
+    }
+    return 1;
+}
+static void create_screens(void);
+// Re-attach after a virtual-desktop switch: Explorer repaints the per-desktop static wallpaper
+// and may hide/recreate the WorkerW. Re-show or re-parent without restarting playback if possible.
+static void reattach_screens(void) {
+    if (!g_nscr) return;
+    HWND old = g_workerw;
+    HWND parent = get_wallpaper_parent();     // re-sends 0x052C so the WorkerW exists again
+    if (parent != old) {                      // host changed: move our surfaces (playback keeps going)
+        for (int i = 0; i < g_nscr; i++) {
+            if (!g_scr[i].hwnd || !IsWindow(g_scr[i].hwnd)) { create_screens(); return; }
+            SetParent(g_scr[i].hwnd, parent);
+        }
+    }
+    if (!IsWindowVisible(parent)) ShowWindow(parent, SW_SHOWNA);
+    for (int i = 0; i < g_nscr; i++) {
+        Screen *s = &g_scr[i];
+        if (!s->hwnd || !screen_file(i)[0]) continue;
+        POINT p = {s->rc.left, s->rc.top}; MapWindowPoints(HWND_DESKTOP, parent, &p, 1);
+        SetWindowPos(s->hwnd, HWND_BOTTOM, p.x, p.y, s->rc.right - s->rc.left, s->rc.bottom - s->rc.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        RedrawWindow(s->hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW);
+    }
+}
+
 static void create_screens(void) {
     destroy_screens();
     int any = g_file[0] != 0; for (int i = 0; i < MAX_MON; i++) any |= g_monFile[i][0] != 0;
@@ -201,7 +236,8 @@ static int is_shell_window(HWND w) {
     wchar_t cls[64]; GetClassNameW(w, cls, 64);
     return !wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Shell_TrayWnd") ||
            !wcscmp(cls, L"Shell_SecondaryTrayWnd") || !wcscmp(cls, L"LiteWallSurface") ||
-           !wcscmp(cls, L"Windows.UI.Core.CoreWindow") || !wcscmp(cls, L"XamlExplorerHostIslandWindow");
+           !wcscmp(cls, L"Windows.UI.Core.CoreWindow") || !wcscmp(cls, L"MultitaskingViewFrame") ||
+           !wcscmp(cls, L"ForegroundStaging") || !wcscmp(cls, L"TaskSwitcherWnd") || !wcscmp(cls, L"XamlExplorerHostIslandWindow_WASDK") || !wcscmp(cls, L"XamlExplorerHostIslandWindow");
 }
 
 // Does a visible top-level window cover (fullscreen) or maximize onto this monitor?
@@ -330,7 +366,7 @@ static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
-    case WM_TIMER: apply_pause(); return 0;
+    case WM_TIMER: if (!surfaces_healthy()) reattach_screens(); apply_pause(); return 0;
     case WM_WTSSESSION_CHANGE:
         if (wp == WTS_SESSION_LOCK) g_locked = 1; else if (wp == WTS_SESSION_UNLOCK) g_locked = 0;
         apply_pause(); return 0;
@@ -347,6 +383,7 @@ static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 static LRESULT CALLBACK msg_proc_wrap(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && (wp == 3 || wp == 4)) { KillTimer(h, wp); reattach_screens(); apply_pause(); return 0; }
     if (msg == WM_TIMER && wp == 2) { KillTimer(h, 2); create_screens(); apply_pause(); return 0; }
     return msg_proc(h, msg, wp, lp);
 }
@@ -380,8 +417,29 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     apply_pause();
     SetTimer(g_msg, ID_TIMER, 1000, NULL);  // 1 Hz check - negligible cost
 
+    // Watch the registry value Explorer updates on every virtual-desktop switch (zero idle cost).
+    HKEY vdk = NULL; HANDLE vdev = CreateEventW(NULL, FALSE, FALSE, NULL);
+    RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VirtualDesktops", 0, NULL, 0, KEY_NOTIFY | KEY_READ, NULL, &vdk, NULL);
+    if (vdk) RegNotifyChangeKeyValue(vdk, TRUE, REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME, vdev, TRUE);
     MSG m;
-    while (GetMessageW(&m, NULL, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageW(&m); }
+    for (;;) {
+        DWORD r = MsgWaitForMultipleObjects(vdk ? 1 : 0, &vdev, FALSE, INFINITE, QS_ALLINPUT);
+        if (vdk && r == WAIT_OBJECT_0) {
+            RegNotifyChangeKeyValue(vdk, TRUE, REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME, vdev, TRUE);
+            reattach_screens();                         // immediately
+            SetTimer(g_msg, 3, 400, NULL);              // after the switch animation
+            SetTimer(g_msg, 4, 1500, NULL);             // and once more once Explorer settles
+            continue;
+        }
+        int quit = 0;
+        while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
+            if (m.message == WM_QUIT) { quit = 1; break; }
+            TranslateMessage(&m); DispatchMessageW(&m);
+        }
+        if (quit) break;
+    }
+    if (vdk) RegCloseKey(vdk);
+    CloseHandle(vdev);
     ReleaseMutex(mutex);
     return 0;
 }
