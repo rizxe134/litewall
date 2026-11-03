@@ -17,17 +17,29 @@ This is a dark, native Win32 window, modeled on Wallpaper Engine. It opens when 
 
 ## Install
 
-1. Download `LiteWall-v0.2.1-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
+1. Download `LiteWall-v0.3.0-win-x64.zip` from Releases and extract it anywhere, for example `C:\Apps\LiteWall`. Keep `LiteWall.exe` and `libmpv-2.dll` together.
 2. Run `LiteWall.exe`, drag a video, GIF, or image into the library, and click **Apply**. That's the whole setup.
 3. Right-click the tray icon to change the wallpaper, pause, change auto-pause behavior, toggle **Start with Windows**, or quit.
 
 Settings are saved to `%APPDATA%\LiteWall\settings.ini`. "Start with Windows" adds a per-user entry under `HKCU\...\Run`, and no admin rights are needed. To uninstall, untick Start with Windows, quit, and delete the folder.
 
+## Optimize for my monitors (v0.3.0, on by default)
+A 4K video on 1080p screens wastes memory: each player keeps 4K decoder surfaces and a 4K render pipeline (about 260 MB per screen). When you import a video that is larger than your biggest monitor, or above 25 Mbps, LiteWall transcodes it once in the background. It makes an H.264 copy at that monitor's resolution, stored in `library\.optimized`, and plays that copy. The original is kept.
+* Encoders are tried in this order: AMD AMF, NVIDIA NVENC, Intel QSV, Media Foundation, then x264 (CPU).
+* Encoding pauses whenever a game or fullscreen app is running.
+* Progress appears under the thumbnail.
+* If you connect a bigger monitor, the copy is re-made at the new size.
+
+**Span across monitors** (setting): one player covers all your monitors with a single stretched picture. This uses the least memory, but each screen shows only part of the image.
+
+## Diagnostics
+Run `LiteWall.exe --tray --log` to write `%APPDATA%\LiteWall\litewall.log`. It contains mpv's log, any rejected options, the window layout, and `STAT` lines with RAM/CPU once a second for 30 s. `--no-video`, `--per-monitor` and `--span` are for A/B tests.
+
 ## How it stays light
 
 | Technique | Effect |
 |---|---|
-| libmpv with `hwdec=auto-safe`, `vo=gpu`, `gpu-api=d3d11` | Decoding runs on the GPU's video engine, not the CPU |
+| libmpv with `hwdec=d3d11va` (zero-copy), `vo=gpu`, `gpu-api=d3d11`, flip model, 1-deep swapchain, rgba8 | Decoding runs on the GPU's video engine, not the CPU |
 | Audio disabled, scripts/OSC/ytdl/config off, `profile=fast`, bilinear scaling | Nothing extra loaded or computed |
 | 16 MiB demuxer buffer, no cache | Small memory footprint |
 | 1 Hz auto-pause check (EnumWindows plus `SHQueryUserNotificationState`) | Negligible overhead |

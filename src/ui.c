@@ -12,7 +12,7 @@
 #define PW 300
 #define PH 169
 enum { IDC_LIST = 1000, IDC_SEARCH, IDC_ADD, IDC_PREVIEW, IDC_NAME, IDC_RES, IDC_MON, IDC_APPLY, IDC_REMOVE,
-       IDC_FILL, IDC_PMAX, IDC_PBAT, IDC_START, IDC_MUTE, IDC_SPEED, IDC_HDR1, IDC_HDR2, IDC_SPEEDLBL, IDC_MONLBL };
+       IDC_FILL, IDC_PMAX, IDC_PBAT, IDC_START, IDC_MUTE, IDC_SPEED, IDC_HDR1, IDC_HDR2, IDC_SPEEDLBL, IDC_MONLBL, IDC_OPT, IDC_SPAN };
 
 typedef struct { wchar_t path[MAX_PATH * 2]; wchar_t name[MAX_PATH]; int w, h, img, ready; } Item;
 
@@ -222,6 +222,7 @@ static void fill_monitors(void) {
 static void sync_settings_ui(void) {
     CheckDlgButton(g_ui, IDC_FILL, g_fill); CheckDlgButton(g_ui, IDC_PMAX, g_pauseOnMaximized);
     CheckDlgButton(g_ui, IDC_PBAT, g_pauseOnBattery); CheckDlgButton(g_ui, IDC_START, startup_enabled()); CheckDlgButton(g_ui, IDC_MUTE, g_mute);
+    CheckDlgButton(g_ui, IDC_OPT, g_optimize); CheckDlgButton(g_ui, IDC_SPAN, g_spanSetting);
     static const int sp[] = {25, 50, 75, 100, 125, 150, 200}; HWND c = GetDlgItem(g_ui, IDC_SPEED);
     for (int i = 0; i < 7; i++) if (sp[i] == g_speedPct) SendMessageW(c, CB_SETCURSEL, i, 0);
 }
@@ -232,7 +233,7 @@ static HWND mk(const wchar_t *cls, const wchar_t *txt, DWORD st, int id) {
 }
 static void layout(void) {
     RECT r; GetClientRect(g_ui, &r); int W = r.right, H = r.bottom, P = 340, m = 16;
-    HDWP d = BeginDeferWindowPos(24);
+    HDWP d = BeginDeferWindowPos(28);
 #define MV(id, x, y, w, h) d = DeferWindowPos(d, GetDlgItem(g_ui, id), NULL, x, y, w, h, SWP_NOZORDER)
     MV(IDC_SEARCH, m, m, 280, 28); MV(IDC_ADD, m + 292, m, 150, 28);
     MV(IDC_LIST, m, m + 44, W - P - 2 * m, H - m - 44 - m);
@@ -243,7 +244,8 @@ static void layout(void) {
     MV(IDC_APPLY, x, y, 190, 32); MV(IDC_REMOVE, x + 200, y, pw - 200, 32); y += 50;
     MV(IDC_HDR2, x, y, pw, 20); y += 26;
     MV(IDC_FILL, x, y, pw, 22); y += 26; MV(IDC_PMAX, x, y, pw, 22); y += 26; MV(IDC_PBAT, x, y, pw, 22); y += 26;
-    MV(IDC_START, x, y, pw, 22); y += 26; MV(IDC_MUTE, x, y, pw, 22); y += 32;
+    MV(IDC_START, x, y, pw, 22); y += 26; MV(IDC_MUTE, x, y, pw, 22); y += 26;
+    MV(IDC_OPT, x, y, pw, 22); y += 26; MV(IDC_SPAN, x, y, pw, 22); y += 32;
     MV(IDC_SPEEDLBL, x, y + 4, 110, 20); MV(IDC_SPEED, x + 115, y, 100, 200);
 #undef MV
     EndDeferWindowPos(d);
@@ -264,7 +266,7 @@ static void add_files_dialog(void) {
         wchar_t *dir = buf, *f = buf + wcslen(buf) + 1;
         if (!*f) lib_import(dir);
         for (; *f; f += wcslen(f) + 1) { wchar_t full[MAX_PATH * 2]; swprintf(full, MAX_PATH * 2, L"%s\\%s", dir, f); lib_import(full); }
-        reload_library();
+        reload_library(); opt_kick();
     }
     free(buf);
 }
@@ -295,16 +297,33 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         mk(L"BUTTON", L"Remove", BS_OWNERDRAW | WS_TABSTOP, IDC_REMOVE);
         SendMessageW(mk(L"STATIC", L"SETTINGS", 0, IDC_HDR2), WM_SETFONT, (WPARAM)g_font, FALSE);
         const struct { int id; const wchar_t *t; } cb[] = {{IDC_FILL, L"Fill screen (crop to fit)"}, {IDC_PMAX, L"Pause when a window is maximized"},
-            {IDC_PBAT, L"Pause on battery"}, {IDC_START, L"Start with Windows"}, {IDC_MUTE, L"Mute audio"}};
-        for (int i = 0; i < 5; i++) SetWindowTheme(mk(L"BUTTON", cb[i].t, BS_AUTOCHECKBOX | WS_TABSTOP, cb[i].id), L"", L""); // unthemed so dark colors apply
+            {IDC_PBAT, L"Pause on battery"}, {IDC_START, L"Start with Windows"}, {IDC_MUTE, L"Mute audio"},
+            {IDC_OPT, L"Optimize videos for my monitors (less RAM)"}, {IDC_SPAN, L"Span one wallpaper across monitors"}};
+        for (int i = 0; i < 7; i++) SetWindowTheme(mk(L"BUTTON", cb[i].t, BS_AUTOCHECKBOX | WS_TABSTOP, cb[i].id), L"", L""); // unthemed so dark colors apply
         mk(L"STATIC", L"Playback speed", 0, IDC_SPEEDLBL);
         HWND sp = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, IDC_SPEED); SetWindowTheme(sp, L"DarkMode_CFD", NULL);
         const wchar_t *spt[] = {L"0.25\u00d7", L"0.5\u00d7", L"0.75\u00d7", L"1\u00d7", L"1.25\u00d7", L"1.5\u00d7", L"2\u00d7"};
         for (int i = 0; i < 7; i++) SendMessageW(sp, CB_ADDSTRING, 0, (LPARAM)spt[i]);
         DragAcceptFiles(h, TRUE);
         layout(); fill_monitors(); sync_settings_ui(); reload_library();
+        SetTimer(h, 7, 700, NULL);
         return 0;
     }
+    case WM_TIMER: if (wp == 7) {   // optimization progress under the thumbnail
+        static int lastRow = -1; int row = -1; wchar_t t[MAX_PATH + 32];
+        for (int r = 0, n = ListView_GetItemCount(g_list); r < n; r++) {
+            LVITEMW li = {LVIF_PARAM, r}; ListView_GetItem(g_list, &li);
+            Item *it = &g_items[li.lParam];
+            if (g_optPath[0] && !_wcsicmp(it->path, g_optPath)) {
+                row = r; swprintf(t, MAX_PATH + 32, L"%s\n\u2699 Optimizing %ld%%", it->name, g_optPct < 0 ? 0L : (long)g_optPct);
+                ListView_SetItemText(g_list, r, 0, t);
+            }
+        }
+        if (lastRow >= 0 && lastRow != row && lastRow < ListView_GetItemCount(g_list)) {
+            LVITEMW li = {LVIF_PARAM, lastRow}; ListView_GetItem(g_list, &li); ListView_SetItemText(g_list, lastRow, 0, g_items[li.lParam].name);
+        }
+        lastRow = row;
+    } return 0;
     case WM_SIZE: layout(); return 0;
     case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x = 860; ((MINMAXINFO *)lp)->ptMinTrackSize.y = 600; return 0;
     case WM_ERASEBKGND: {
@@ -366,7 +385,7 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DROPFILES: {
         HDROP d = (HDROP)wp; UINT n = DragQueryFileW(d, 0xFFFFFFFF, NULL, 0); int added = 0;
         for (UINT i = 0; i < n; i++) { wchar_t f[MAX_PATH * 2]; DragQueryFileW(d, i, f, MAX_PATH * 2); added += lib_import(f) ? 1 : 0; }
-        DragFinish(d); if (added) reload_library();
+        DragFinish(d); if (added) { reload_library(); opt_kick(); }
         return 0;
     }
     case WM_COMMAND: {
@@ -383,22 +402,27 @@ static LRESULT CALLBACK ui_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (!_wcsicmp(g_file, g_items[i].path)) g_file[0] = 0;
             if (inuse) { save_settings(); create_screens(); apply_pause(); }
             wchar_t png[MAX_PATH], meta[MAX_PATH]; thumb_paths(g_items[i].path, png, meta);
-            DeleteFileW(png); DeleteFileW(meta); DeleteFileW(g_items[i].path);
+            DeleteFileW(png); DeleteFileW(meta); opt_delete_for(g_items[i].path); DeleteFileW(g_items[i].path);
             reload_library();
+        }
+        else if (code == BN_CLICKED && (id == IDC_OPT || id == IDC_SPAN)) {
+            int on = IsDlgButtonChecked(h, id) == BST_CHECKED;
+            if (id == IDC_OPT) g_optimize = on; else g_spanSetting = on;
+            save_settings(); create_screens(); apply_pause(); fill_monitors();
         }
         else if (code == BN_CLICKED && id >= IDC_FILL && id <= IDC_MUTE) {
             int on = IsDlgButtonChecked(h, id) == BST_CHECKED;
-            if (id == IDC_FILL) { g_fill = on; for (int i = 0; i < g_nscr; i++) if (g_scr[i].mpv) mpv_set_property_string(g_scr[i].mpv, "panscan", on ? "1.0" : "0.0"); }
+            if (id == IDC_FILL) { g_fill = on; players_set_string("panscan", on ? "1.0" : "0.0"); request_redraw(); }
             if (id == IDC_PMAX) g_pauseOnMaximized = on;
             if (id == IDC_PBAT) g_pauseOnBattery = on;
             if (id == IDC_START) set_startup(on);
-            if (id == IDC_MUTE) { g_mute = on; for (int i = 0; i < g_nscr; i++) if (g_scr[i].mpv) mpv_set_property_string(g_scr[i].mpv, "aid", on ? "no" : "auto"); }
+            if (id == IDC_MUTE) { g_mute = on; players_set_string("aid", on ? "no" : "auto"); }
             save_settings(); apply_pause();
         }
         else if (id == IDC_SPEED && code == CBN_SELCHANGE) {
             static const int sp[] = {25, 50, 75, 100, 125, 150, 200};
             int k = (int)SendDlgItemMessageW(h, IDC_SPEED, CB_GETCURSEL, 0, 0); if (k >= 0 && k < 7) g_speedPct = sp[k];
-            double v = g_speedPct / 100.0; for (int i = 0; i < g_nscr; i++) if (g_scr[i].mpv) mpv_set_property(g_scr[i].mpv, "speed", MPV_FORMAT_DOUBLE, &v);
+            double v = g_speedPct / 100.0; players_set_double("speed", v);
             save_settings();
         }
         return 0;
