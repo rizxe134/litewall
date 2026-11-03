@@ -27,7 +27,10 @@ enum { IDM_LIBRARY = 99, IDM_CHOOSE = 100, IDM_PAUSE, IDM_STARTUP, IDM_BATTERY, 
 typedef struct { HWND hwnd; RECT rc, wr; int paused; int grp; } Screen; // rc = monitor, wr = our window
 /* diagnostics / A-B modes (v0.2.3-diag) */
 enum { MODE_TILE = 0, MODE_PERMON = 1, MODE_SPAN = 2 };
-static int g_gameActive;   // a fullscreen app / game is up (drives encoder pausing)
+static int g_gameActive;
+static char g_mpvOpts[2048];   // --mpv-opts "k=v,k=v" passthrough (A/B testing)
+static int g_statSecs = 30, g_exitAfterStats;
+static double g_sumPriv, g_sumCpu; static int g_nSum;   // a fullscreen app / game is up (drives encoder pausing)
 static void opt_kick(void);
 static int g_optimize = 1, g_spanSetting = 0;
 static int g_mode = MODE_PERMON, g_log = 0, g_noVideo = 0, g_statTicks = 0;
@@ -163,7 +166,7 @@ static mpv_handle *mpv_start(HWND wid_wnd, const wchar_t *shader) {
         {"profile", "fast"}, {"fbo-format", "rgba8"}, {"interpolation", "no"}, {"deband", "no"},
         {"dither-depth", "no"}, {"scale", "bilinear"}, {"dscale", "bilinear"}, {"cscale", "bilinear"},
         {"correct-downscaling", "no"}, {"linear-downscaling", "no"}, {"sigmoid-upscaling", "no"},
-        {"hdr-compute-peak", "no"}, {"video-sync", "display-desync"}, {"force-window", "yes"},
+        {"hdr-compute-peak", "no"}, {"video-sync", "audio"}, {"blend-subtitles", "no"}, {"hr-seek", "no"}, {"video-latency-hacks", "yes"}, {"force-window", "yes"},
         {"loop-file", "inf"}, {"image-display-duration", "inf"}, {"keep-open", "yes"}, {"idle", "yes"},
         {"cache", "no"}, {"demuxer-max-bytes", "2MiB"}, {"demuxer-max-back-bytes", "0"},
         {"demuxer-readahead-secs", "1"}, {"audio-buffer", "0.1"}, {"stop-screensaver", "no"},
@@ -175,6 +178,14 @@ static mpv_handle *mpv_start(HWND wid_wnd, const wchar_t *shader) {
         setopt(m, "glsl-shaders", sp8); setopt(m, "keepaspect", "no"); setopt(m, "panscan", "0.0");
     } else setopt(m, "panscan", g_fill ? "1.0" : "0.0");
     setopt(m, "gpu-shader-cache", "no"); setopt(m, "icc-profile-auto", "no");
+    if (g_mpvOpts[0]) {   // user overrides last, so they win
+        char buf[2048]; strcpy(buf, g_mpvOpts);
+        for (char *tok = strtok(buf, ",;"); tok; tok = strtok(NULL, ",;")) {
+            while (*tok == ' ') tok++;
+            char *eq = strchr(tok, '='); if (!eq) { setopt(m, tok, "yes"); LOG("mpv-opts: %s=yes", tok); continue; }
+            *eq = 0; setopt(m, tok, eq + 1); LOG("mpv-opts: %s=%s", tok, eq + 1);
+        }
+    }
     setopt(m, "aid", g_mute ? "no" : "auto");
     { double sp = g_speedPct / 100.0; mpv_set_option(m, "speed", MPV_FORMAT_DOUBLE, &sp); }
     if (mpv_initialize(m) < 0) { LOG("mpv_initialize FAILED"); mpv_terminate_destroy(m); return NULL; }
@@ -355,6 +366,7 @@ static void log_stats(void) {
     static ULONGLONG last; static DWORD lastT;
     DWORD now = GetTickCount(); double pct = lastT ? 100.0 * (double)(cpu - last) / (double)(now - lastT) : 0;
     last = cpu; lastT = now;
+    if (g_statTicks >= 10) { g_sumPriv += pm.PrivateUsage / 1048576.0; g_sumCpu += pct; g_nSum++; }
     LOG("STAT t=%ds private=%.1fMB workingset=%.1fMB peakWS=%.1fMB cpu_total=%.2fs cpu_1s=%.1f%%core paused=%d",
         g_statTicks, pm.PrivateUsage / 1048576.0, pm.WorkingSetSize / 1048576.0, pm.PeakWorkingSetSize / 1048576.0, cpu / 1000.0, pct, g_allPaused);
 }
@@ -556,7 +568,12 @@ static LRESULT CALLBACK msg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 static LRESULT CALLBACK msg_proc_wrap(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_OPT_DONE) { LOG("optimized copy ready -> reloading players"); create_screens(); apply_pause(); return 0; }
-    if (msg == WM_TIMER && wp == 5) { g_statTicks++; log_stats(); if (g_statTicks == 3 || g_statTicks == 15) for (int g = 0; g < g_ngrp; g++) if (g_grp[g].mpv) log_player_props(g_grp[g].mpv, g); if (g_statTicks >= 30) { KillTimer(h, 5); LOG("stat sampling done"); } return 0; }
+    if (msg == WM_TIMER && wp == 5) { g_statTicks++; log_stats(); if (g_statTicks == 3 || g_statTicks == 15) for (int g = 0; g < g_ngrp; g++) if (g_grp[g].mpv) log_player_props(g_grp[g].mpv, g); if (g_statTicks >= g_statSecs) {
+        KillTimer(h, 5);
+        LOG("SUMMARY avg_private=%.1fMB avg_cpu_1s=%.1f%%core samples=%d (t>=10s) mode=%d opts=%s", g_nSum ? g_sumPriv / g_nSum : 0, g_nSum ? g_sumCpu / g_nSum : 0, g_nSum, g_mode, g_mpvOpts[0] ? g_mpvOpts : "(defaults)");
+        LOG("stat sampling done");
+        if (g_exitAfterStats) DestroyWindow(g_msg);
+    } return 0; }
     if (msg == WM_TIMER && (wp == 3 || wp == 4)) { KillTimer(h, wp); reattach_screens(); apply_pause(); return 0; }
     if (msg == WM_TIMER && wp == 2) { KillTimer(h, 2); create_screens(); apply_pause(); return 0; }
     return msg_proc(h, msg, wp, lp);
@@ -573,12 +590,19 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show) {
     {
         const wchar_t *cl = GetCommandLineW();
         g_log = wcsstr(cl, L"--log") != NULL; g_noVideo = wcsstr(cl, L"--no-video") != NULL;
+        g_exitAfterStats = wcsstr(cl, L"--exit-after-stats") != NULL;
+        int argc; LPWSTR *argv = CommandLineToArgvW(cl, &argc);
+        for (int i = 1; argv && i < argc; i++) {
+            if (!wcscmp(argv[i], L"--mpv-opts") && i + 1 < argc) WideCharToMultiByte(CP_UTF8, 0, argv[++i], -1, g_mpvOpts, sizeof g_mpvOpts, NULL, NULL);
+            else if (!wcscmp(argv[i], L"--stat-secs") && i + 1 < argc) { g_statSecs = _wtoi(argv[++i]); if (g_statSecs < 12) g_statSecs = 12; }
+        }
+        LocalFree(argv);
         if (g_log) {
             wchar_t lp[MAX_PATH]; swprintf(lp, MAX_PATH, L"%s\\litewall.log", g_appdir);
             g_logf = _wfopen(lp, L"w");
             OSVERSIONINFOW ov = {sizeof ov};
             typedef LONG(WINAPI * RtlGV)(OSVERSIONINFOW *); RtlGV rg = (RtlGV)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"); if (rg) rg(&ov);
-            LOG("LiteWall 0.3.1  cmdline=%ls", cl);
+            LOG("LiteWall 0.3.2  cmdline=%ls", cl);
             LOG("Windows %lu.%lu build %lu; settings file=%ls fill=%d mute=%d speed=%d", ov.dwMajorVersion, ov.dwMinorVersion, ov.dwBuildNumber, g_file, g_fill, g_mute, g_speedPct);
             DISPLAY_DEVICEW dd = {sizeof dd}; for (DWORD i = 0; EnumDisplayDevicesW(NULL, i, &dd, 0); i++) { if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) LOG("display %ls: %ls", dd.DeviceName, dd.DeviceString); dd.cb = sizeof dd; }
         }
